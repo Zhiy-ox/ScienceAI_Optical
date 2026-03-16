@@ -12,7 +12,7 @@ def test_health_check():
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "ok"
-    assert data["version"] == "0.2.0"
+    assert data["version"] == "0.3.0"
 
 
 def test_start_research_returns_session_id():
@@ -26,21 +26,27 @@ def test_start_research_returns_session_id():
     assert data["status"] == "started"
 
 
-def test_start_research_with_phase():
+def test_start_research_with_phase_1():
+    resp = client.post(
+        "/api/v1/research/start",
+        json={"question": "Test", "phase": 1, "max_papers": 10},
+    )
+    assert resp.status_code == 200
+
+
+def test_start_research_with_phase_3():
     resp = client.post(
         "/api/v1/research/start",
         json={
-            "question": "Liquid crystal OPA research",
-            "phase": 1,
-            "max_papers": 10,
+            "question": "Liquid crystal OPA",
+            "phase": 3,
+            "user_background": "Photonics researcher",
         },
     )
     assert resp.status_code == 200
-    data = resp.json()
-    assert "session_id" in data
 
 
-def test_start_research_default_phase_is_2():
+def test_start_research_default_phase_is_3():
     resp = client.post(
         "/api/v1/research/start",
         json={"question": "Test question"},

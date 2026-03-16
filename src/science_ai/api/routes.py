@@ -48,7 +48,12 @@ async def start_research(
     _cost_trackers[session_id] = CostTracker()
 
     background_tasks.add_task(
-        _run_pipeline, session_id, request.question, request.max_papers, request.phase
+        _run_pipeline,
+        session_id,
+        request.question,
+        request.max_papers,
+        request.phase,
+        request.user_background,
     )
 
     return SessionCreated(session_id=session_id)
@@ -95,19 +100,43 @@ async def get_session_results(session_id: str):
         critiques=result.get("critiques", []),
         gaps=result.get("gaps", []),
         verified_gaps=result.get("verified_gaps", []),
+        ideas=result.get("ideas", []),
+        experiment_plans=result.get("experiment_plans", []),
+        report=result.get("report"),
         cost_summary=result.get("cost_summary"),
     )
 
 
 async def _run_pipeline(
-    session_id: str, question: str, max_papers: int, phase: int
+    session_id: str,
+    question: str,
+    max_papers: int,
+    phase: int,
+    user_background: str = "",
 ) -> None:
     """Background task that runs the research pipeline."""
     tracker = _cost_trackers.get(session_id, CostTracker())
-    orchestrator = ResearchOrchestrator(cost_tracker=tracker)
+
+    # Use InMemoryGraphStore for Phase 3 (no Neo4j dependency required)
+    graph_store = None
+    if phase >= 3:
+        from science_ai.storage.graph_store import InMemoryGraphStore
+        graph_store = InMemoryGraphStore()
+
+    orchestrator = ResearchOrchestrator(
+        cost_tracker=tracker,
+        graph_store=graph_store,
+    )
 
     try:
-        if phase >= 2:
+        if phase >= 3:
+            result = await orchestrator.run_phase3(
+                question=question,
+                session_id=session_id,
+                max_papers_to_read=max_papers,
+                user_background=user_background,
+            )
+        elif phase >= 2:
             result = await orchestrator.run_phase2(
                 question=question,
                 session_id=session_id,

@@ -8,9 +8,12 @@ from typing import Any
 
 from science_ai.agents.critique import CritiqueAgent
 from science_ai.agents.deep_reader import DeepReader
+from science_ai.agents.experiment_planner import ExperimentPlanner
 from science_ai.agents.gap_detector import GapDetector
+from science_ai.agents.idea_generator import IdeaGenerator
 from science_ai.agents.paper_triage import PaperTriage
 from science_ai.agents.query_planner import QueryPlanner
+from science_ai.agents.report_writer import ReportWriter
 from science_ai.agents.verification import VerificationAgent
 from science_ai.cost.tracker import CostTracker
 from science_ai.orchestrator.feedback import FeedbackController
@@ -45,6 +48,7 @@ class ResearchOrchestrator:
         search_service: PaperSearchService | None = None,
         model_router: ModelRouter | None = None,
         vector_store=None,
+        graph_store=None,
         embedding_fn=None,
     ) -> None:
         self.cost_tracker = cost_tracker or CostTracker()
@@ -53,6 +57,7 @@ class ResearchOrchestrator:
         self.router = model_router or ModelRouter()
         self.feedback = FeedbackController()
         self.vector_store = vector_store
+        self.graph_store = graph_store
         self.embedding_fn = embedding_fn
 
     async def run_phase1(
@@ -209,12 +214,22 @@ class ResearchOrchestrator:
                 except Exception:
                     logger.exception("Failed to index paper %s", ko.get("paper_id"))
 
-        # Step 6: Gap Detection (mechanisms A + D + LLM synthesis)
+        # Populate graph store if available
+        if self.graph_store:
+            logger.info("Populating knowledge graph with %d papers", len(knowledge_objects))
+            for ko in knowledge_objects:
+                try:
+                    await self.graph_store.ingest_knowledge_object(ko)
+                except Exception:
+                    logger.exception("Failed to ingest paper %s into graph", ko.get("paper_id"))
+
+        # Step 6: Gap Detection (all 4 mechanisms + LLM synthesis)
         logger.info("Step 6: Gap Detection")
         gap_detector = GapDetector(
             self.llm,
             session_id=session_id,
             embedding_fn=self.embedding_fn,
+            graph_store=self.graph_store,
         )
         gaps = await gap_detector.run(
             knowledge_objects=knowledge_objects,
@@ -258,6 +273,120 @@ class ResearchOrchestrator:
             "gaps": gaps,
             "verification_results": verification_results,
             "verified_gaps": verified_gaps,
+            "cost_summary": cost_summary,
+            "status": "completed",
+        }
+
+    async def run_phase3(
+        self,
+        question: str,
+        *,
+        session_id: str | None = None,
+        max_papers_to_read: int = 15,
+        user_background: str = "",
+    ) -> dict[str, Any]:
+        """Run full pipeline (Phase 1 + 2 + 3): adds ideas, experiments, and report.
+
+        Phase 3 additions:
+        - Idea Generator → research ideas from verified gaps
+        - Experiment Planner → concrete experiment plans
+        - Feedback Loop 3 → regenerate infeasible ideas
+        - Report Writer → comprehensive final report
+        """
+        # Run Phase 2 first (which includes Phase 1)
+        phase2_result = await self.run_phase2(
+            question=question,
+            session_id=session_id,
+            max_papers_to_read=max_papers_to_read,
+        )
+
+        session_id = phase2_result["session_id"]
+        knowledge_objects = phase2_result.get("knowledge_objects", [])
+        verified_gaps = phase2_result.get("verified_gaps", [])
+
+        if not verified_gaps:
+            logger.warning("No verified gaps found — skipping idea generation")
+            phase2_result["ideas"] = []
+            phase2_result["experiment_plans"] = []
+            phase2_result["report"] = None
+            return phase2_result
+
+        # Step 8: Idea Generation
+        logger.info("Step 8: Idea Generation (%d verified gaps)", len(verified_gaps))
+        idea_gen = IdeaGenerator(self.llm, session_id=session_id)
+        ideas = await idea_gen.run(
+            verified_gaps=verified_gaps,
+            knowledge_objects=knowledge_objects,
+            user_background=user_background,
+        )
+
+        # Step 9: Experiment Planning + Feedback Loop 3
+        logger.info("Step 9: Experiment Planning (%d ideas)", len(ideas))
+        exp_planner = ExperimentPlanner(self.llm, session_id=session_id)
+        experiment_plans: list[dict[str, Any]] = []
+
+        for idea in ideas:
+            try:
+                plan = await exp_planner.run(
+                    idea=idea, knowledge_objects=knowledge_objects,
+                )
+                feasibility = plan.get("feasibility_score", 0.5)
+
+                # Feedback Loop 3: regenerate infeasible ideas
+                if self.feedback.should_regenerate_idea(session_id, feasibility):
+                    logger.info(
+                        "Feedback Loop 3: idea '%s' infeasible (%.2f), regenerating",
+                        idea.get("title", ""), feasibility,
+                    )
+                    # Regenerate with feasibility constraints
+                    new_ideas = await idea_gen.run(
+                        verified_gaps=[g for g in verified_gaps if g.get("gap_id") == idea.get("source_gap")],
+                        knowledge_objects=knowledge_objects,
+                        user_background=user_background + f"\nConstraint: previous idea was infeasible due to: {plan.get('experiment_plan', {}).get('risks', [])}",
+                    )
+                    if new_ideas:
+                        idea = new_ideas[0]  # Use the regenerated idea
+                        plan = await exp_planner.run(
+                            idea=idea, knowledge_objects=knowledge_objects,
+                        )
+
+                experiment_plans.append(plan)
+            except Exception:
+                logger.exception("Failed to plan experiment for idea '%s'", idea.get("title", ""))
+
+        # Step 10: Report Generation
+        logger.info("Step 10: Report Generation")
+        report_writer = ReportWriter(self.llm, session_id=session_id)
+        cost_summary = self.cost_tracker.session_summary(session_id)
+
+        try:
+            report = await report_writer.run(
+                question=question,
+                plan=phase2_result.get("plan", {}),
+                knowledge_objects=knowledge_objects,
+                critiques=phase2_result.get("critiques", []),
+                verified_gaps=verified_gaps,
+                ideas=ideas,
+                experiment_plans=experiment_plans,
+                cost_summary=cost_summary,
+            )
+        except Exception:
+            logger.exception("Failed to generate report")
+            report = None
+
+        cost_summary = self.cost_tracker.session_summary(session_id)
+        logger.info(
+            "Phase 3 complete: %d ideas, %d experiment plans, report=%s, cost $%.4f",
+            len(ideas), len(experiment_plans),
+            "yes" if report else "no",
+            cost_summary["total_usd"],
+        )
+
+        return {
+            **phase2_result,
+            "ideas": ideas,
+            "experiment_plans": experiment_plans,
+            "report": report,
             "cost_summary": cost_summary,
             "status": "completed",
         }
