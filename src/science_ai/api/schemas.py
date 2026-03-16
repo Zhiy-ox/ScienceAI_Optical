@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field
 class StartResearchRequest(BaseModel):
     question: str = Field(..., description="Research question in natural language")
     max_papers: int = Field(default=15, ge=1, le=50, description="Max papers to deep-read")
+    phase: int = Field(default=3, ge=1, le=3, description="Pipeline phase to run (1, 2, or 3)")
+    user_background: str = Field(default="", description="Optional researcher background for personalization")
 
 
 # -- Responses --
@@ -34,6 +36,12 @@ class ResearchResult(BaseModel):
     papers_found: int = 0
     triage_results: list[dict] = []
     knowledge_objects: list[dict] = []
+    critiques: list[dict] = []
+    gaps: list[dict] = []
+    verified_gaps: list[dict] = []
+    ideas: list[dict] = []
+    experiment_plans: list[dict] = []
+    report: dict | None = None
     cost_summary: CostSummary | None = None
 
 
@@ -43,6 +51,30 @@ class SessionStatus(BaseModel):
     cost_so_far: float = 0.0
 
 
+class CostDetail(BaseModel):
+    """Per-call cost record."""
+    call_id: str
+    agent: str
+    model: str
+    reasoning_effort: str
+    input_tokens: int
+    output_tokens: int
+    cached_tokens: int
+    cost_usd: float
+    timestamp: float
+
+
+class DetailedCostReport(BaseModel):
+    """Detailed cost report for a research session."""
+    session_id: str
+    total_usd: float
+    by_model: dict[str, float]
+    by_agent: dict[str, float]
+    call_count: int
+    cache_savings_estimate_usd: float
+    calls: list[CostDetail]
+
+
 class HealthResponse(BaseModel):
     status: str = "ok"
-    version: str = "0.1.0"
+    version: str = "0.4.0"

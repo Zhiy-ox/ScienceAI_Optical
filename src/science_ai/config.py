@@ -22,8 +22,12 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
+    # Qdrant
+    qdrant_url: str = "http://localhost:6333"
+
     # Embedding
     openai_embedding_model: str = "text-embedding-3-large"
+    embedding_dimension: int = 1536
 
     # Cost budget (USD) — pipeline stops if exceeded
     cost_budget_usd: float = Field(default=10.0)

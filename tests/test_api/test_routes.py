@@ -1,6 +1,5 @@
 """Tests for the FastAPI routes."""
 
-import pytest
 from fastapi.testclient import TestClient
 
 from science_ai.main import app
@@ -13,7 +12,7 @@ def test_health_check():
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "ok"
-    assert data["version"] == "0.1.0"
+    assert data["version"] == "0.4.0"
 
 
 def test_start_research_returns_session_id():
@@ -27,6 +26,34 @@ def test_start_research_returns_session_id():
     assert data["status"] == "started"
 
 
+def test_start_research_with_phase_1():
+    resp = client.post(
+        "/api/v1/research/start",
+        json={"question": "Test", "phase": 1, "max_papers": 10},
+    )
+    assert resp.status_code == 200
+
+
+def test_start_research_with_phase_3():
+    resp = client.post(
+        "/api/v1/research/start",
+        json={
+            "question": "Liquid crystal OPA",
+            "phase": 3,
+            "user_background": "Photonics researcher",
+        },
+    )
+    assert resp.status_code == 200
+
+
+def test_start_research_default_phase_is_3():
+    resp = client.post(
+        "/api/v1/research/start",
+        json={"question": "Test question"},
+    )
+    assert resp.status_code == 200
+
+
 def test_status_404_for_unknown_session():
     resp = client.get("/api/v1/research/nonexistent/status")
     assert resp.status_code == 404
@@ -35,3 +62,14 @@ def test_status_404_for_unknown_session():
 def test_results_404_for_unknown_session():
     resp = client.get("/api/v1/research/nonexistent/results")
     assert resp.status_code == 404
+
+
+def test_cost_404_for_unknown_session():
+    resp = client.get("/api/v1/research/nonexistent/cost")
+    assert resp.status_code == 404
+
+
+def test_health_version_is_0_4_0():
+    resp = client.get("/api/v1/health")
+    data = resp.json()
+    assert data["version"] == "0.4.0"
