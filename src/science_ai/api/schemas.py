@@ -51,6 +51,30 @@ class SessionStatus(BaseModel):
     cost_so_far: float = 0.0
 
 
+class CostDetail(BaseModel):
+    """Per-call cost record."""
+    call_id: str
+    agent: str
+    model: str
+    reasoning_effort: str
+    input_tokens: int
+    output_tokens: int
+    cached_tokens: int
+    cost_usd: float
+    timestamp: float
+
+
+class DetailedCostReport(BaseModel):
+    """Detailed cost report for a research session."""
+    session_id: str
+    total_usd: float
+    by_model: dict[str, float]
+    by_agent: dict[str, float]
+    call_count: int
+    cache_savings_estimate_usd: float
+    calls: list[CostDetail]
+
+
 class HealthResponse(BaseModel):
     status: str = "ok"
-    version: str = "0.3.0"
+    version: str = "0.4.0"

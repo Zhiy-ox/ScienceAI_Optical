@@ -8,6 +8,8 @@ import uuid
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from science_ai.api.schemas import (
+    CostDetail,
+    DetailedCostReport,
     HealthResponse,
     ResearchResult,
     SessionCreated,
@@ -104,6 +106,65 @@ async def get_session_results(session_id: str):
         experiment_plans=result.get("experiment_plans", []),
         report=result.get("report"),
         cost_summary=result.get("cost_summary"),
+    )
+
+
+@router.get("/research/{session_id}/cost", response_model=DetailedCostReport)
+async def get_session_cost(session_id: str):
+    """Get detailed cost report for a research session."""
+    session = _sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    tracker = _cost_trackers.get(session_id)
+    if not tracker:
+        raise HTTPException(status_code=404, detail="No cost data for session")
+
+    records = tracker.all_records_for_session(session_id)
+    summary = tracker.session_summary(session_id)
+
+    # Group costs by agent
+    by_agent: dict[str, float] = {}
+    total_cached_tokens = 0
+    for r in records:
+        by_agent[r["agent"]] = by_agent.get(r["agent"], 0.0) + r["cost_usd"]
+        total_cached_tokens += r.get("cached_tokens", 0)
+
+    # Estimate cache savings (cached tokens charged at ~10% of input rate)
+    # Savings = cached_tokens * (full_rate - cached_rate) / 1M
+    cache_savings = 0.0
+    for r in records:
+        from science_ai.config import MODEL_PRICING
+        pricing = MODEL_PRICING.get(r["model"], {})
+        if pricing and r.get("cached_tokens", 0) > 0:
+            full_rate = pricing.get("input_per_m", 0)
+            cached_rate = pricing.get("cached_input_per_m", 0)
+            savings = (r["cached_tokens"] / 1_000_000) * (full_rate - cached_rate)
+            cache_savings += savings
+
+    calls = [
+        CostDetail(
+            call_id=r["call_id"],
+            agent=r["agent"],
+            model=r["model"],
+            reasoning_effort=r["reasoning_effort"],
+            input_tokens=r["input_tokens"],
+            output_tokens=r["output_tokens"],
+            cached_tokens=r["cached_tokens"],
+            cost_usd=r["cost_usd"],
+            timestamp=r["timestamp"],
+        )
+        for r in records
+    ]
+
+    return DetailedCostReport(
+        session_id=session_id,
+        total_usd=summary["total_usd"],
+        by_model=summary["by_model"],
+        by_agent={k: round(v, 4) for k, v in by_agent.items()},
+        call_count=summary["call_count"],
+        cache_savings_estimate_usd=round(cache_savings, 4),
+        calls=calls,
     )
 
 
