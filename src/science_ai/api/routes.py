@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 
@@ -22,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# In-memory session store (Phase 1 — will move to Redis/DB later)
+# In-memory session store (will move to Redis/DB later)
 _sessions: dict[str, dict] = {}
 _cost_trackers: dict[str, CostTracker] = {}
 
@@ -43,12 +42,13 @@ async def start_research(
     _sessions[session_id] = {
         "status": "running",
         "question": request.question,
+        "phase": request.phase,
         "result": None,
     }
     _cost_trackers[session_id] = CostTracker()
 
     background_tasks.add_task(
-        _run_pipeline, session_id, request.question, request.max_papers
+        _run_pipeline, session_id, request.question, request.max_papers, request.phase
     )
 
     return SessionCreated(session_id=session_id)
@@ -92,21 +92,33 @@ async def get_session_results(session_id: str):
         papers_found=result.get("papers_found", 0),
         triage_results=result.get("triage_results", []),
         knowledge_objects=result.get("knowledge_objects", []),
+        critiques=result.get("critiques", []),
+        gaps=result.get("gaps", []),
+        verified_gaps=result.get("verified_gaps", []),
         cost_summary=result.get("cost_summary"),
     )
 
 
-async def _run_pipeline(session_id: str, question: str, max_papers: int) -> None:
-    """Background task that runs the full Phase 1 pipeline."""
+async def _run_pipeline(
+    session_id: str, question: str, max_papers: int, phase: int
+) -> None:
+    """Background task that runs the research pipeline."""
     tracker = _cost_trackers.get(session_id, CostTracker())
     orchestrator = ResearchOrchestrator(cost_tracker=tracker)
 
     try:
-        result = await orchestrator.run_phase1(
-            question=question,
-            session_id=session_id,
-            max_papers_to_read=max_papers,
-        )
+        if phase >= 2:
+            result = await orchestrator.run_phase2(
+                question=question,
+                session_id=session_id,
+                max_papers_to_read=max_papers,
+            )
+        else:
+            result = await orchestrator.run_phase1(
+                question=question,
+                session_id=session_id,
+                max_papers_to_read=max_papers,
+            )
         _sessions[session_id]["result"] = result
         _sessions[session_id]["status"] = "completed"
     except Exception:

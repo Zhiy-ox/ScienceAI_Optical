@@ -1,6 +1,5 @@
 """Tests for the FastAPI routes."""
 
-import pytest
 from fastapi.testclient import TestClient
 
 from science_ai.main import app
@@ -13,7 +12,7 @@ def test_health_check():
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "ok"
-    assert data["version"] == "0.1.0"
+    assert data["version"] == "0.2.0"
 
 
 def test_start_research_returns_session_id():
@@ -25,6 +24,28 @@ def test_start_research_returns_session_id():
     data = resp.json()
     assert "session_id" in data
     assert data["status"] == "started"
+
+
+def test_start_research_with_phase():
+    resp = client.post(
+        "/api/v1/research/start",
+        json={
+            "question": "Liquid crystal OPA research",
+            "phase": 1,
+            "max_papers": 10,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "session_id" in data
+
+
+def test_start_research_default_phase_is_2():
+    resp = client.post(
+        "/api/v1/research/start",
+        json={"question": "Test question"},
+    )
+    assert resp.status_code == 200
 
 
 def test_status_404_for_unknown_session():

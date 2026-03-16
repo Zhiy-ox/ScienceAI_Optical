@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 class StartResearchRequest(BaseModel):
     question: str = Field(..., description="Research question in natural language")
     max_papers: int = Field(default=15, ge=1, le=50, description="Max papers to deep-read")
+    phase: int = Field(default=2, ge=1, le=2, description="Pipeline phase to run (1 or 2)")
 
 
 # -- Responses --
@@ -34,6 +35,9 @@ class ResearchResult(BaseModel):
     papers_found: int = 0
     triage_results: list[dict] = []
     knowledge_objects: list[dict] = []
+    critiques: list[dict] = []
+    gaps: list[dict] = []
+    verified_gaps: list[dict] = []
     cost_summary: CostSummary | None = None
 
 
@@ -45,4 +49,4 @@ class SessionStatus(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = "ok"
-    version: str = "0.1.0"
+    version: str = "0.2.0"
