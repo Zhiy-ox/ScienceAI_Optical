@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-large"
     embedding_dimension: int = 1536
 
+    # Zotero
+    zotero_library_id: str = ""
+    zotero_api_key: str = ""
+    zotero_library_type: str = "user"  # "user" or "group"
+
     # Cost budget (USD) — pipeline stops if exceeded
     cost_budget_usd: float = Field(default=10.0)
 

@@ -67,6 +67,50 @@ export interface StartResearchRequest {
   max_papers?: number;
   phase?: number;
   user_background?: string;
+  source?: "web" | "zotero" | "both";
+}
+
+export interface SettingsResponse {
+  openai_api_key: string;
+  anthropic_api_key: string;
+  google_api_key: string;
+  zotero_library_id: string;
+  zotero_api_key: string;
+  zotero_library_type: string;
+  cost_budget_usd: number;
+}
+
+export interface SettingsUpdate {
+  openai_api_key?: string;
+  anthropic_api_key?: string;
+  google_api_key?: string;
+  zotero_library_id?: string;
+  zotero_api_key?: string;
+  zotero_library_type?: string;
+  cost_budget_usd?: number;
+}
+
+export interface ProviderTestResult {
+  provider: string;
+  ok: boolean;
+  message: string;
+}
+
+export interface SettingsTestResponse {
+  results: ProviderTestResult[];
+}
+
+export interface SessionListItem {
+  session_id: string;
+  status: string;
+  question: string;
+  cost_so_far: number;
+}
+
+export interface ZoteroCollection {
+  key: string;
+  name: string;
+  num_items: number;
 }
 
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
@@ -98,4 +142,23 @@ export const api = {
 
   getCost: (sessionId: string) =>
     fetchJSON<DetailedCostReport>(`/research/${sessionId}/cost`),
+
+  // Settings
+  getSettings: () => fetchJSON<SettingsResponse>("/settings"),
+
+  updateSettings: (data: SettingsUpdate) =>
+    fetchJSON<SettingsResponse>("/settings", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  testSettings: () =>
+    fetchJSON<SettingsTestResponse>("/settings/test", { method: "POST" }),
+
+  // Sessions
+  listSessions: () => fetchJSON<SessionListItem[]>("/sessions"),
+
+  // Zotero
+  listZoteroCollections: () =>
+    fetchJSON<ZoteroCollection[]>("/zotero/collections"),
 };

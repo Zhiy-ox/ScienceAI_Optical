@@ -3,21 +3,13 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import GlassCard, { StatCard, StatusBadge } from "@/components/GlassCard";
-import { api, type HealthResponse, type SessionStatus } from "@/lib/api";
-
-/** Demo sessions for when API is not available. */
-const DEMO_SESSIONS: SessionStatus[] = [
-  { session_id: "demo-001", status: "completed", cost_so_far: 2.34 },
-  { session_id: "demo-002", status: "running", cost_so_far: 0.89 },
-  { session_id: "demo-003", status: "completed", cost_so_far: 4.12 },
-  { session_id: "demo-004", status: "failed", cost_so_far: 0.45 },
-  { session_id: "demo-005", status: "started", cost_so_far: 0.0 },
-];
+import { api, type HealthResponse, type SessionListItem } from "@/lib/api";
 
 export default function DashboardPage() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [sessions] = useState<SessionStatus[]>(DEMO_SESSIONS);
+  const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [connected, setConnected] = useState(false);
+  const [keysConfigured, setKeysConfigured] = useState(true);
 
   useEffect(() => {
     api.health()
@@ -26,6 +18,17 @@ export default function DashboardPage() {
         setConnected(true);
       })
       .catch(() => setConnected(false));
+
+    api.listSessions()
+      .then(setSessions)
+      .catch(() => {});
+
+    api.getSettings()
+      .then((s) => {
+        const hasKey = !!(s.openai_api_key || s.anthropic_api_key || s.google_api_key);
+        setKeysConfigured(hasKey);
+      })
+      .catch(() => {});
   }, []);
 
   const totalCost = sessions.reduce((s, sess) => s + sess.cost_so_far, 0);
@@ -55,6 +58,26 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/* API key warning */}
+      {connected && !keysConfigured && (
+        <GlassCard hover={false} className="border-[var(--accent-amber)]" style={{ borderColor: "var(--accent-amber)" }}>
+          <div className="flex items-center gap-3">
+            <svg className="w-5 h-5 text-[var(--accent-amber)] shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+            </svg>
+            <div>
+              <p className="text-sm text-[var(--accent-amber)] font-medium">No API keys configured</p>
+              <p className="text-xs text-white/40 mt-0.5">
+                <Link href="/settings" className="text-[var(--accent-blue)] hover:text-[var(--accent-teal)]">
+                  Configure your API keys in Settings
+                </Link>{" "}
+                before starting research.
+              </p>
+            </div>
+          </div>
+        </GlassCard>
+      )}
+
       {/* Stats row */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <StatCard label="Total Sessions" value={sessions.length} />
@@ -77,56 +100,65 @@ export default function DashboardPage() {
           </Link>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-white/5">
-                <th className="text-left text-xs text-white/30 uppercase tracking-wider pb-3 font-medium">
-                  Session ID
-                </th>
-                <th className="text-left text-xs text-white/30 uppercase tracking-wider pb-3 font-medium">
-                  Status
-                </th>
-                <th className="text-right text-xs text-white/30 uppercase tracking-wider pb-3 font-medium">
-                  Cost
-                </th>
-                <th className="text-right text-xs text-white/30 uppercase tracking-wider pb-3 font-medium">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {sessions.map((sess) => (
-                <tr
-                  key={sess.session_id}
-                  className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors"
-                >
-                  <td className="py-4">
-                    <span className="font-mono text-sm text-white/70">
-                      {sess.session_id.slice(0, 12)}...
-                    </span>
-                  </td>
-                  <td className="py-4">
-                    <StatusBadge status={sess.status} />
-                  </td>
-                  <td className="py-4 text-right">
-                    <span className="font-mono text-sm text-white/60">
-                      ${sess.cost_so_far.toFixed(4)}
-                    </span>
-                  </td>
-                  <td className="py-4 text-right">
-                    <Link
-                      href={`/session?id=${sess.session_id}`}
-                      className="text-xs text-[var(--accent-blue)] hover:text-[var(--accent-teal)] transition-colors"
-                    >
-                      View Details →
-                    </Link>
-                  </td>
+        {sessions.length === 0 ? (
+          <div className="text-center py-12">
+            <p className="text-white/40 text-sm">No sessions yet — start your first research.</p>
+            <Link href="/new" className="text-[var(--accent-blue)] text-sm mt-2 inline-block hover:text-[var(--accent-teal)]">
+              Start Research →
+            </Link>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-white/5">
+                  <th className="text-left text-xs text-white/30 uppercase tracking-wider pb-3 font-medium">
+                    Question
+                  </th>
+                  <th className="text-left text-xs text-white/30 uppercase tracking-wider pb-3 font-medium">
+                    Status
+                  </th>
+                  <th className="text-right text-xs text-white/30 uppercase tracking-wider pb-3 font-medium">
+                    Cost
+                  </th>
+                  <th className="text-right text-xs text-white/30 uppercase tracking-wider pb-3 font-medium">
+                    Actions
+                  </th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {sessions.map((sess) => (
+                  <tr
+                    key={sess.session_id}
+                    className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors"
+                  >
+                    <td className="py-4 max-w-xs">
+                      <span className="text-sm text-white/70 truncate block">
+                        {sess.question || sess.session_id.slice(0, 12) + "..."}
+                      </span>
+                    </td>
+                    <td className="py-4">
+                      <StatusBadge status={sess.status} />
+                    </td>
+                    <td className="py-4 text-right">
+                      <span className="font-mono text-sm text-white/60">
+                        ${sess.cost_so_far.toFixed(4)}
+                      </span>
+                    </td>
+                    <td className="py-4 text-right">
+                      <Link
+                        href={`/session?id=${sess.session_id}`}
+                        className="text-xs text-[var(--accent-blue)] hover:text-[var(--accent-teal)] transition-colors"
+                      >
+                        View Details →
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </GlassCard>
 
       {/* Pipeline visualization */}

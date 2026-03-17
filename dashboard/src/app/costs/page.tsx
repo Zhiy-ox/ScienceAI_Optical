@@ -1,31 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import GlassCard, { StatCard } from "@/components/GlassCard";
-
-/** Demo cost data for offline mode. */
-const DEMO_COST_DATA = {
-  total_usd: 7.80,
-  by_model: {
-    "claude-opus-4-6": 3.85,
-    "gpt-5.4": 2.45,
-    "claude-sonnet-4-6": 0.95,
-    "gemini/gemini-3.1-pro": 0.55,
-  },
-  by_agent: {
-    deep_reader: 2.90,
-    report_writer: 1.65,
-    gap_detector: 1.20,
-    critique: 0.80,
-    query_planner: 0.45,
-    paper_triage: 0.40,
-    verification: 0.25,
-    idea_generator: 0.15,
-  },
-  call_count: 42,
-  cache_savings: 1.23,
-  sessions: 5,
-};
+import { api, type DetailedCostReport } from "@/lib/api";
 
 const MODEL_COLORS: Record<string, string> = {
   "claude-opus-4-6": "var(--accent-purple)",
@@ -45,11 +22,90 @@ const AGENT_COLORS: Record<string, string> = {
   idea_generator: "var(--accent-purple)",
 };
 
-export default function CostsPage() {
-  const [data] = useState(DEMO_COST_DATA);
+interface AggregatedCosts {
+  total_usd: number;
+  by_model: Record<string, number>;
+  by_agent: Record<string, number>;
+  call_count: number;
+  cache_savings: number;
+  sessions: number;
+}
 
-  const maxModelCost = Math.max(...Object.values(data.by_model));
-  const maxAgentCost = Math.max(...Object.values(data.by_agent));
+export default function CostsPage() {
+  const [data, setData] = useState<AggregatedCosts>({
+    total_usd: 0,
+    by_model: {},
+    by_agent: {},
+    call_count: 0,
+    cache_savings: 0,
+    sessions: 0,
+  });
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function loadCosts() {
+      try {
+        const sessions = await api.listSessions();
+        if (sessions.length === 0) {
+          setLoading(false);
+          return;
+        }
+
+        const agg: AggregatedCosts = {
+          total_usd: 0,
+          by_model: {},
+          by_agent: {},
+          call_count: 0,
+          cache_savings: 0,
+          sessions: sessions.length,
+        };
+
+        // Fetch cost reports for completed sessions
+        const completed = sessions.filter((s) => s.status === "completed");
+        const reports = await Promise.allSettled(
+          completed.map((s) => api.getCost(s.session_id))
+        );
+
+        for (const r of reports) {
+          if (r.status !== "fulfilled") continue;
+          const report: DetailedCostReport = r.value;
+          agg.total_usd += report.total_usd;
+          agg.call_count += report.call_count;
+          agg.cache_savings += report.cache_savings_estimate_usd;
+
+          for (const [model, cost] of Object.entries(report.by_model)) {
+            agg.by_model[model] = (agg.by_model[model] || 0) + cost;
+          }
+          for (const [agent, cost] of Object.entries(report.by_agent)) {
+            agg.by_agent[agent] = (agg.by_agent[agent] || 0) + cost;
+          }
+        }
+
+        setData(agg);
+      } catch {
+        // Stay with empty data
+      } finally {
+        setLoading(false);
+      }
+    }
+    loadCosts();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        <div className="shimmer h-8 w-48" />
+        <div className="grid grid-cols-5 gap-4">
+          {[1, 2, 3, 4, 5].map((i) => <div key={i} className="shimmer h-24" />)}
+        </div>
+        <div className="shimmer h-64" />
+      </div>
+    );
+  }
+
+  const hasData = data.total_usd > 0;
+  const maxModelCost = hasData ? Math.max(...Object.values(data.by_model)) : 1;
+  const maxAgentCost = hasData ? Math.max(...Object.values(data.by_agent)) : 1;
 
   return (
     <div className="space-y-8">
@@ -72,82 +128,89 @@ export default function CostsPage() {
         />
         <StatCard
           label="Avg per Session"
-          value={`$${(data.total_usd / data.sessions).toFixed(2)}`}
+          value={`$${data.sessions > 0 ? (data.total_usd / data.sessions).toFixed(2) : "0.00"}`}
           variant="amber"
         />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Cost by model */}
+      {!hasData ? (
         <GlassCard hover={false}>
-          <h3 className="text-base font-semibold text-white/80 mb-6">Cost by Model</h3>
-          <div className="space-y-4">
-            {Object.entries(data.by_model)
-              .sort(([, a], [, b]) => b - a)
-              .map(([model, cost]) => {
-                const pct = (cost / maxModelCost) * 100;
+          <div className="text-center py-12">
+            <p className="text-white/40 text-sm">No cost data yet. Complete a research session to see analytics.</p>
+          </div>
+        </GlassCard>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Cost by model */}
+          <GlassCard hover={false}>
+            <h3 className="text-base font-semibold text-white/80 mb-6">Cost by Model</h3>
+            <div className="space-y-4">
+              {Object.entries(data.by_model)
+                .sort(([, a], [, b]) => b - a)
+                .map(([model, cost]) => {
+                  const pct = (cost / maxModelCost) * 100;
+                  const color = MODEL_COLORS[model] || "var(--accent-blue)";
+                  return (
+                    <div key={model}>
+                      <div className="flex justify-between text-sm mb-2">
+                        <span className="text-white/60 font-mono text-xs">{model}</span>
+                        <span className="text-white/70 font-semibold">${cost.toFixed(2)}</span>
+                      </div>
+                      <div className="h-2 rounded-full bg-white/5 overflow-hidden">
+                        <div
+                          className="h-full rounded-full transition-all duration-700"
+                          style={{ width: `${pct}%`, background: color }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+
+            <div className="mt-6 pt-4 border-t border-white/5 flex flex-wrap gap-3">
+              {Object.entries(data.by_model).map(([model, cost]) => {
+                const pct = ((cost / data.total_usd) * 100).toFixed(0);
                 const color = MODEL_COLORS[model] || "var(--accent-blue)";
                 return (
-                  <div key={model}>
-                    <div className="flex justify-between text-sm mb-2">
-                      <span className="text-white/60 font-mono text-xs">{model}</span>
-                      <span className="text-white/70 font-semibold">${cost.toFixed(2)}</span>
-                    </div>
-                    <div className="h-2 rounded-full bg-white/5 overflow-hidden">
-                      <div
-                        className="h-full rounded-full transition-all duration-700"
-                        style={{ width: `${pct}%`, background: color }}
-                      />
-                    </div>
+                  <div key={model} className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full" style={{ background: color }} />
+                    <span className="text-[11px] text-white/40">
+                      {model.split("/").pop()} ({pct}%)
+                    </span>
                   </div>
                 );
               })}
-          </div>
+            </div>
+          </GlassCard>
 
-          {/* Pie-chart-like breakdown */}
-          <div className="mt-6 pt-4 border-t border-white/5 flex flex-wrap gap-3">
-            {Object.entries(data.by_model).map(([model, cost]) => {
-              const pct = ((cost / data.total_usd) * 100).toFixed(0);
-              const color = MODEL_COLORS[model] || "var(--accent-blue)";
-              return (
-                <div key={model} className="flex items-center gap-2">
-                  <div className="w-2 h-2 rounded-full" style={{ background: color }} />
-                  <span className="text-[11px] text-white/40">
-                    {model.split("/").pop()} ({pct}%)
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </GlassCard>
-
-        {/* Cost by agent */}
-        <GlassCard hover={false}>
-          <h3 className="text-base font-semibold text-white/80 mb-6">Cost by Agent</h3>
-          <div className="space-y-4">
-            {Object.entries(data.by_agent)
-              .sort(([, a], [, b]) => b - a)
-              .map(([agent, cost]) => {
-                const pct = (cost / maxAgentCost) * 100;
-                const color = AGENT_COLORS[agent] || "var(--accent-blue)";
-                return (
-                  <div key={agent}>
-                    <div className="flex justify-between text-sm mb-2">
-                      <span className="text-white/60 text-xs">{agent.replace(/_/g, " ")}</span>
-                      <span className="text-white/70 font-semibold">${cost.toFixed(2)}</span>
+          {/* Cost by agent */}
+          <GlassCard hover={false}>
+            <h3 className="text-base font-semibold text-white/80 mb-6">Cost by Agent</h3>
+            <div className="space-y-4">
+              {Object.entries(data.by_agent)
+                .sort(([, a], [, b]) => b - a)
+                .map(([agent, cost]) => {
+                  const pct = (cost / maxAgentCost) * 100;
+                  const color = AGENT_COLORS[agent] || "var(--accent-blue)";
+                  return (
+                    <div key={agent}>
+                      <div className="flex justify-between text-sm mb-2">
+                        <span className="text-white/60 text-xs">{agent.replace(/_/g, " ")}</span>
+                        <span className="text-white/70 font-semibold">${cost.toFixed(2)}</span>
+                      </div>
+                      <div className="h-2 rounded-full bg-white/5 overflow-hidden">
+                        <div
+                          className="h-full rounded-full transition-all duration-700"
+                          style={{ width: `${pct}%`, background: color }}
+                        />
+                      </div>
                     </div>
-                    <div className="h-2 rounded-full bg-white/5 overflow-hidden">
-                      <div
-                        className="h-full rounded-full transition-all duration-700"
-                        style={{ width: `${pct}%`, background: color }}
-                      />
-                    </div>
-                  </div>
-                );
-              })}
-          </div>
-        </GlassCard>
-      </div>
+                  );
+                })}
+            </div>
+          </GlassCard>
+        </div>
+      )}
 
       {/* Optimization tips */}
       <GlassCard hover={false}>

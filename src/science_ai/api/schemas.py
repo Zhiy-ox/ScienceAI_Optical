@@ -12,6 +12,7 @@ class StartResearchRequest(BaseModel):
     max_papers: int = Field(default=15, ge=1, le=50, description="Max papers to deep-read")
     phase: int = Field(default=3, ge=1, le=3, description="Pipeline phase to run (1, 2, or 3)")
     user_background: str = Field(default="", description="Optional researcher background for personalization")
+    source: str = Field(default="web", description="Paper source: 'web', 'zotero', or 'both'")
 
 
 # -- Responses --
@@ -78,3 +79,54 @@ class DetailedCostReport(BaseModel):
 class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "0.4.0"
+
+
+# -- Settings --
+
+class SettingsUpdate(BaseModel):
+    """Settings update request — only set fields are updated."""
+    openai_api_key: str | None = None
+    anthropic_api_key: str | None = None
+    google_api_key: str | None = None
+    zotero_library_id: str | None = None
+    zotero_api_key: str | None = None
+    zotero_library_type: str | None = None
+    cost_budget_usd: float | None = None
+
+
+class SettingsResponse(BaseModel):
+    """Returns masked keys and config — never exposes full keys."""
+    openai_api_key: str  # masked, e.g. "sk-...abc"
+    anthropic_api_key: str
+    google_api_key: str
+    zotero_library_id: str
+    zotero_api_key: str
+    zotero_library_type: str
+    cost_budget_usd: float
+
+
+class ProviderTestResult(BaseModel):
+    provider: str
+    ok: bool
+    message: str
+
+
+class SettingsTestResponse(BaseModel):
+    results: list[ProviderTestResult]
+
+
+# -- Sessions --
+
+class SessionListItem(BaseModel):
+    session_id: str
+    status: str
+    question: str
+    cost_so_far: float
+
+
+# -- Zotero --
+
+class ZoteroCollection(BaseModel):
+    key: str
+    name: str
+    num_items: int

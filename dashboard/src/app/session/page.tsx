@@ -6,79 +6,55 @@ import Link from "next/link";
 import GlassCard, { StatCard, StatusBadge } from "@/components/GlassCard";
 import { api, type ResearchResult } from "@/lib/api";
 
-/** Demo data for offline mode. */
-const DEMO_RESULT: ResearchResult = {
-  session_id: "demo-001",
-  status: "completed",
-  plan: {
-    decomposed_questions: [
-      "What are the current silicon photonic OPA architectures?",
-      "How do OPA beam steering mechanisms compare?",
-      "What are the scaling limitations of current OPAs?",
-    ],
-    search_queries: [
-      { keywords: ["optical phased array", "silicon photonics", "beam steering"], source: "semantic_scholar" },
-      { keywords: ["OPA", "LiDAR", "integrated photonics"], source: "arxiv" },
-    ],
-  },
-  papers_found: 47,
-  triage_results: [
-    { paper_id: "p1", title: "Large-Scale Silicon Photonic OPA", relevance_score: 0.95, priority: "must_read" },
-    { paper_id: "p2", title: "Beam Steering with Liquid Crystal OPA", relevance_score: 0.88, priority: "must_read" },
-    { paper_id: "p3", title: "Thermal Tuning in Integrated Photonics", relevance_score: 0.72, priority: "worth_reading" },
-  ],
-  knowledge_objects: [
-    { paper_id: "p1", title: "Large-Scale Silicon Photonic OPA", method: { core_idea: "Cascaded phase shifter array" } },
-    { paper_id: "p2", title: "Beam Steering with Liquid Crystal OPA", method: { core_idea: "LC-based phase modulation" } },
-  ],
-  critiques: [
-    { paper_id: "p1", assumption_issues: ["Assumes uniform waveguide loss"], experimental_weaknesses: ["Limited to 1D steering"] },
-  ],
-  gaps: [
-    { gap_type: "method_gap", title: "No hybrid LC-silicon OPA architecture explored", confidence: 0.82 },
-    { gap_type: "evaluation_blindspot", title: "Power consumption not benchmarked across architectures", confidence: 0.76 },
-  ],
-  verified_gaps: [
-    { gap_type: "method_gap", title: "No hybrid LC-silicon OPA architecture explored", status: "verified_gap" },
-  ],
-  ideas: [
-    { title: "Hybrid LC-Silicon Cascaded OPA", strategy: "method_transfer", feasibility_score: 0.78 },
-  ],
-  experiment_plans: [
-    { idea_title: "Hybrid LC-Silicon Cascaded OPA", feasibility_score: 0.78, phases: ["Simulation", "Fabrication", "Characterization"] },
-  ],
-  report: {
-    title: "Research Report: Silicon-Based Optical Phased Arrays for LiDAR",
-    sections: [
-      { heading: "Executive Summary", content: "This report surveys the state of silicon-based OPA technology..." },
-      { heading: "Literature Review", content: "We analyzed 47 papers spanning 2020-2025..." },
-      { heading: "Research Gaps", content: "Two primary gaps were identified..." },
-      { heading: "Proposed Ideas", content: "We propose a hybrid LC-silicon cascaded OPA..." },
-    ],
-  },
-  cost_summary: { session_id: "demo-001", total_usd: 2.34, by_model: { "claude-opus-4-6": 1.52, "gpt-5.4": 0.62, "gemini/gemini-3.1-pro": 0.20 }, call_count: 18 },
-};
-
 function SessionContent() {
   const searchParams = useSearchParams();
   const sessionId = searchParams.get("id") || "";
   const [result, setResult] = useState<ResearchResult | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState("overview");
 
   useEffect(() => {
     if (!sessionId) return;
 
-    api.getResults(sessionId)
-      .then(setResult)
-      .catch(() => {
-        // Use demo data in offline mode
-        if (sessionId.startsWith("demo")) {
-          setResult({ ...DEMO_RESULT, session_id: sessionId });
-        }
-      })
-      .finally(() => setLoading(false));
-  }, [sessionId]);
+    let cancelled = false;
+
+    const fetchResults = () => {
+      api.getResults(sessionId)
+        .then((r) => {
+          if (!cancelled) {
+            setResult(r);
+            setLoading(false);
+            setError("");
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            // Check if still running (202)
+            if (err.message?.includes("202")) {
+              setError("");
+              // Keep loading state, will retry via polling
+            } else {
+              setError(err.message || "Failed to load session");
+              setLoading(false);
+            }
+          }
+        });
+    };
+
+    fetchResults();
+
+    // Auto-refresh polling when status is running
+    const interval = setInterval(() => {
+      if (result?.status === "completed" || result?.status === "failed") return;
+      fetchResults();
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [sessionId, result?.status]);
 
   if (!sessionId) {
     return (
@@ -91,7 +67,7 @@ function SessionContent() {
     );
   }
 
-  if (loading) {
+  if (loading && !result) {
     return (
       <div className="space-y-6">
         <div className="shimmer h-8 w-64" />
@@ -99,14 +75,30 @@ function SessionContent() {
           {[1, 2, 3, 4].map((i) => <div key={i} className="shimmer h-24" />)}
         </div>
         <div className="shimmer h-64" />
+        {!error && (
+          <div className="text-center">
+            <p className="text-white/40 text-sm">Pipeline is running... auto-refreshing every 5s</p>
+          </div>
+        )}
       </div>
+    );
+  }
+
+  if (error && !result) {
+    return (
+      <GlassCard>
+        <p className="text-[var(--accent-rose)] text-sm">{error}</p>
+        <Link href="/" className="text-[var(--accent-blue)] text-sm mt-2 inline-block">
+          ← Back to Dashboard
+        </Link>
+      </GlassCard>
     );
   }
 
   if (!result) {
     return (
       <GlassCard>
-        <p className="text-white/50">Session not found or still running.</p>
+        <p className="text-white/50">Session not found.</p>
         <Link href="/" className="text-[var(--accent-blue)] text-sm mt-2 inline-block">
           ← Back to Dashboard
         </Link>
@@ -170,7 +162,6 @@ function SessionContent() {
       {/* Tab content */}
       {activeTab === "overview" && (
         <div className="space-y-4">
-          {/* Plan */}
           {result.plan && (
             <GlassCard hover={false}>
               <h3 className="text-base font-semibold text-white/80 mb-4">Research Plan</h3>
@@ -188,7 +179,6 @@ function SessionContent() {
                 </div>
               )}
 
-              {/* Cost by model */}
               {result.cost_summary?.by_model && (
                 <div>
                   <p className="text-xs text-white/40 uppercase tracking-wider mb-3">Cost by Model</p>
@@ -308,7 +298,6 @@ function SessionContent() {
                     </div>
                   )}
                 </div>
-                {/* Experiment plan if available */}
                 {result.experiment_plans[i] && (
                   <div className="mt-4 pt-3 border-t border-white/5">
                     <p className="text-xs text-white/40 uppercase tracking-wider mb-2">Experiment Phases</p>
