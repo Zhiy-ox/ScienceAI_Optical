@@ -50,6 +50,7 @@ class ResearchOrchestrator:
         vector_store=None,
         graph_store=None,
         embedding_fn=None,
+        zotero_client=None,
     ) -> None:
         self.cost_tracker = cost_tracker or CostTracker()
         self.llm = LLMClient(cost_tracker=self.cost_tracker)
@@ -59,6 +60,7 @@ class ResearchOrchestrator:
         self.vector_store = vector_store
         self.graph_store = graph_store
         self.embedding_fn = embedding_fn
+        self.zotero_client = zotero_client
 
     async def run_phase1(
         self,
@@ -66,10 +68,11 @@ class ResearchOrchestrator:
         *,
         session_id: str | None = None,
         max_papers_to_read: int = 15,
+        source: str = "web",
     ) -> dict[str, Any]:
         """Run Phase 1: plan → search → triage → read."""
         session_id = session_id or str(uuid.uuid4())
-        logger.info("Starting Phase 1 pipeline for session %s", session_id)
+        logger.info("Starting Phase 1 pipeline for session %s (source=%s)", session_id, source)
 
         # Step 1: Query Planning
         logger.info("Step 1: Query Planning")
@@ -78,7 +81,25 @@ class ResearchOrchestrator:
 
         # Step 2: Paper Search
         logger.info("Step 2: Paper Search")
-        all_papers = await self._execute_search(plan)
+        all_papers = []
+
+        # Fetch from web sources
+        if source in ("web", "both"):
+            all_papers = await self._execute_search(plan)
+
+        # Fetch from Zotero
+        if source in ("zotero", "both") and self.zotero_client:
+            try:
+                zotero_papers = self.zotero_client.search(question, limit=50)
+                # Deduplicate against existing papers
+                seen_titles = {p.title.lower().strip() for p in all_papers}
+                for zp in zotero_papers:
+                    if zp.title.lower().strip() not in seen_titles:
+                        all_papers.append(zp)
+                        seen_titles.add(zp.title.lower().strip())
+                logger.info("Added %d papers from Zotero", len(zotero_papers))
+            except Exception:
+                logger.exception("Zotero search failed")
         logger.info("Found %d unique papers", len(all_papers))
 
         if not all_papers:
@@ -162,6 +183,7 @@ class ResearchOrchestrator:
             "knowledge_objects": knowledge_objects,
             "cost_summary": cost_summary,
             "status": "completed",
+            "_all_papers": all_papers,  # kept for Zotero export
         }
 
     async def run_phase2(
@@ -170,6 +192,7 @@ class ResearchOrchestrator:
         *,
         session_id: str | None = None,
         max_papers_to_read: int = 15,
+        source: str = "web",
     ) -> dict[str, Any]:
         """Run Phase 1 + Phase 2: adds critique, gap detection, and verification.
 
@@ -183,6 +206,7 @@ class ResearchOrchestrator:
             question=question,
             session_id=session_id,
             max_papers_to_read=max_papers_to_read,
+            source=source,
         )
 
         session_id = phase1_result["session_id"]
@@ -284,6 +308,7 @@ class ResearchOrchestrator:
         session_id: str | None = None,
         max_papers_to_read: int = 15,
         user_background: str = "",
+        source: str = "web",
     ) -> dict[str, Any]:
         """Run full pipeline (Phase 1 + 2 + 3): adds ideas, experiments, and report.
 
@@ -298,6 +323,7 @@ class ResearchOrchestrator:
             question=question,
             session_id=session_id,
             max_papers_to_read=max_papers_to_read,
+            source=source,
         )
 
         session_id = phase2_result["session_id"]
@@ -374,6 +400,28 @@ class ResearchOrchestrator:
             logger.exception("Failed to generate report")
             report = None
 
+        # Export to Zotero if client is configured
+        zotero_collection_key = None
+        if self.zotero_client:
+            try:
+                from science_ai.services.paper_search import PaperMeta
+                # Reconstruct all_papers from phase1 (stored in triage_results via paper_id)
+                all_papers_meta = phase2_result.get("_all_papers", [])
+                zotero_collection_key = self.zotero_client.export_session(
+                    session_id=session_id,
+                    question=question,
+                    triage_results=phase2_result.get("triage_results", []),
+                    knowledge_objects=knowledge_objects,
+                    critiques=phase2_result.get("critiques", []),
+                    verified_gaps=verified_gaps,
+                    ideas=ideas,
+                    report=report,
+                    all_papers=all_papers_meta,
+                )
+                logger.info("Exported to Zotero collection: %s", zotero_collection_key)
+            except Exception:
+                logger.exception("Failed to export session to Zotero")
+
         cost_summary = self.cost_tracker.session_summary(session_id)
         logger.info(
             "Phase 3 complete: %d ideas, %d experiment plans, report=%s, cost $%.4f",
@@ -382,7 +430,7 @@ class ResearchOrchestrator:
             cost_summary["total_usd"],
         )
 
-        return {
+        result = {
             **phase2_result,
             "ideas": ideas,
             "experiment_plans": experiment_plans,
@@ -390,6 +438,9 @@ class ResearchOrchestrator:
             "cost_summary": cost_summary,
             "status": "completed",
         }
+        if zotero_collection_key:
+            result["zotero_collection_key"] = zotero_collection_key
+        return result
 
     async def _search_refinement_loop(
         self,

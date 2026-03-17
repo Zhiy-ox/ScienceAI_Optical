@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import GlassCard from "@/components/GlassCard";
-import { api } from "@/lib/api";
+import { api, type ZoteroCollection } from "@/lib/api";
 
 export default function NewResearchPage() {
   const router = useRouter();
@@ -11,8 +12,28 @@ export default function NewResearchPage() {
   const [maxPapers, setMaxPapers] = useState(15);
   const [phase, setPhase] = useState(3);
   const [background, setBackground] = useState("");
+  const [source, setSource] = useState<"web" | "zotero" | "both">("web");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [keysConfigured, setKeysConfigured] = useState(true);
+  const [zoteroConfigured, setZoteroConfigured] = useState(false);
+  const [collections, setCollections] = useState<ZoteroCollection[]>([]);
+
+  useEffect(() => {
+    api.getSettings()
+      .then((s) => {
+        const hasKey = !!(s.openai_api_key || s.anthropic_api_key || s.google_api_key);
+        setKeysConfigured(hasKey);
+        setZoteroConfigured(!!(s.zotero_library_id && s.zotero_api_key));
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (zoteroConfigured) {
+      api.listZoteroCollections().then(setCollections).catch(() => {});
+    }
+  }, [zoteroConfigured]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -27,6 +48,7 @@ export default function NewResearchPage() {
         max_papers: maxPapers,
         phase,
         user_background: background.trim(),
+        source,
       });
       router.push(`/session?id=${res.session_id}`);
     } catch (err) {
@@ -44,6 +66,26 @@ export default function NewResearchPage() {
         </p>
       </div>
 
+      {/* API key warning */}
+      {!keysConfigured && (
+        <GlassCard hover={false}>
+          <div className="flex items-center gap-3">
+            <svg className="w-5 h-5 text-[var(--accent-amber)] shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+            </svg>
+            <div>
+              <p className="text-sm text-[var(--accent-amber)] font-medium">API keys not configured</p>
+              <p className="text-xs text-white/40 mt-0.5">
+                <Link href="/settings" className="text-[var(--accent-blue)] hover:text-[var(--accent-teal)]">
+                  Configure your API keys in Settings
+                </Link>{" "}
+                before starting research.
+              </p>
+            </div>
+          </div>
+        </GlassCard>
+      )}
+
       <GlassCard hover={false}>
         <form onSubmit={handleSubmit} className="space-y-6">
           {/* Research Question */}
@@ -59,6 +101,63 @@ export default function NewResearchPage() {
               required
             />
           </div>
+
+          {/* Paper Source */}
+          <div>
+            <label className="block text-sm font-medium text-white/60 mb-3">
+              Paper Source
+            </label>
+            <div className="grid grid-cols-3 gap-3">
+              {([
+                { value: "web" as const, label: "Web Search", desc: "Semantic Scholar + arXiv" },
+                { value: "zotero" as const, label: "Zotero Library", desc: "Your personal library" },
+                { value: "both" as const, label: "Both", desc: "Web + Zotero combined" },
+              ]).map((s) => (
+                <button
+                  key={s.value}
+                  type="button"
+                  onClick={() => setSource(s.value)}
+                  disabled={s.value !== "web" && !zoteroConfigured}
+                  className={`glass-subtle p-4 text-left transition-all ${
+                    s.value !== "web" && !zoteroConfigured
+                      ? "opacity-30 cursor-not-allowed"
+                      : "cursor-pointer"
+                  } ${
+                    source === s.value
+                      ? "border-[var(--accent-blue)] bg-white/[0.06]"
+                      : "hover:bg-white/[0.03]"
+                  }`}
+                  style={source === s.value ? { borderColor: "var(--accent-blue)", borderWidth: 1 } : {}}
+                >
+                  <span className={`text-sm font-semibold ${
+                    source === s.value ? "text-[var(--accent-blue)]" : "text-white/70"
+                  }`}>
+                    {s.label}
+                  </span>
+                  <p className="text-xs text-white/35 mt-1">{s.desc}</p>
+                </button>
+              ))}
+            </div>
+            {!zoteroConfigured && (
+              <p className="text-xs text-white/25 mt-2">
+                <Link href="/settings" className="text-[var(--accent-blue)]">Configure Zotero</Link> to use library sources.
+              </p>
+            )}
+          </div>
+
+          {/* Zotero collections hint */}
+          {(source === "zotero" || source === "both") && collections.length > 0 && (
+            <div className="glass-subtle p-3">
+              <p className="text-xs text-white/40 mb-2">Available collections in your library:</p>
+              <div className="flex flex-wrap gap-2">
+                {collections.slice(0, 8).map((c) => (
+                  <span key={c.key} className="glass-badge badge-started text-[10px]">
+                    {c.name} ({c.num_items})
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Phase selector */}
           <div>
@@ -160,12 +259,13 @@ export default function NewResearchPage() {
         <p className="font-medium text-white/60">How it works:</p>
         <ol className="list-decimal list-inside space-y-1">
           <li>AI plans search queries from your research question</li>
-          <li>Searches Semantic Scholar & arXiv for relevant papers</li>
+          <li>Searches Semantic Scholar, arXiv, & your Zotero library for papers</li>
           <li>Triages papers with Gemini 3.1 Pro for relevance</li>
           <li>Deep-reads top papers with Claude Opus 4.6</li>
           <li>Detects research gaps using 4 mechanisms</li>
           <li>Generates novel research ideas and experiment plans</li>
           <li>Produces a comprehensive research report</li>
+          <li>Exports results to your Zotero library (if configured)</li>
         </ol>
       </GlassCard>
     </div>
