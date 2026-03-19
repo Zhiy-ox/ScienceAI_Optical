@@ -108,9 +108,9 @@ function SessionContent() {
 
   const tabs = [
     { id: "overview", label: "Overview" },
-    { id: "papers", label: `Papers (${result.papers_found})` },
-    { id: "gaps", label: `Gaps (${result.gaps.length})` },
-    { id: "ideas", label: `Ideas (${result.ideas.length})` },
+    { id: "papers", label: `Papers (${result.papers_found ?? 0})` },
+    { id: "gaps", label: `Gaps (${result.gaps?.length ?? 0})` },
+    { id: "ideas", label: `Ideas (${result.ideas?.length ?? 0})` },
     { id: "report", label: "Report" },
   ];
 
@@ -130,10 +130,10 @@ function SessionContent() {
 
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-        <StatCard label="Papers Found" value={result.papers_found} />
-        <StatCard label="Knowledge Objects" value={result.knowledge_objects.length} variant="purple" />
-        <StatCard label="Gaps Found" value={result.gaps.length} />
-        <StatCard label="Verified Gaps" value={result.verified_gaps.length} variant="purple" />
+        <StatCard label="Papers Found" value={result.papers_found ?? 0} />
+        <StatCard label="Knowledge Objects" value={result.knowledge_objects?.length ?? 0} variant="purple" />
+        <StatCard label="Gaps Found" value={result.gaps?.length ?? 0} />
+        <StatCard label="Verified Gaps" value={result.verified_gaps?.length ?? 0} variant="purple" />
         <StatCard
           label="Total Cost"
           value={`$${result.cost_summary?.total_usd.toFixed(2) || "0.00"}`}
@@ -244,9 +244,9 @@ function SessionContent() {
 
       {activeTab === "gaps" && (
         <div className="space-y-3">
-          {result.gaps.map((gap, i) => {
+          {(result.gaps ?? []).map((gap, i) => {
             const g = gap as Record<string, unknown>;
-            const verified = result.verified_gaps.some(
+            const verified = (result.verified_gaps ?? []).some(
               (vg) => (vg as Record<string, unknown>).title === g.title
             );
             return (
@@ -270,7 +270,7 @@ function SessionContent() {
               </GlassCard>
             );
           })}
-          {result.gaps.length === 0 && (
+          {(result.gaps?.length ?? 0) === 0 && (
             <GlassCard hover={false}>
               <p className="text-white/40 text-sm">No gaps detected.</p>
             </GlassCard>
@@ -280,7 +280,7 @@ function SessionContent() {
 
       {activeTab === "ideas" && (
         <div className="space-y-3">
-          {result.ideas.map((idea, i) => {
+          {(result.ideas ?? []).map((idea, i) => {
             const d = idea as Record<string, unknown>;
             return (
               <GlassCard key={i}>
@@ -298,7 +298,7 @@ function SessionContent() {
                     </div>
                   )}
                 </div>
-                {result.experiment_plans[i] && (
+                {result.experiment_plans?.[i] && (
                   <div className="mt-4 pt-3 border-t border-white/5">
                     <p className="text-xs text-white/40 uppercase tracking-wider mb-2">Experiment Phases</p>
                     <div className="flex gap-2">
@@ -311,7 +311,7 @@ function SessionContent() {
               </GlassCard>
             );
           })}
-          {result.ideas.length === 0 && (
+          {(result.ideas?.length ?? 0) === 0 && (
             <GlassCard hover={false}>
               <p className="text-white/40 text-sm">No ideas generated.</p>
             </GlassCard>
