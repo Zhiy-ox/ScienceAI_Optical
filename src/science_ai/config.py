@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     zotero_library_type: str = "user"  # "user" or "group"
 
     # LLM Backend: "api" (paid, via litellm) or "cli" (free, via local CLI tools)
-    llm_backend: str = "api"
+    llm_backend: str = "cli"
     cli_codex_command: str = "codex"
     cli_gemini_command: str = "gemini"
     cli_claude_command: str = "claude"

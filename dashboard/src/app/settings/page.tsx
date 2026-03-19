@@ -38,7 +38,7 @@ export default function SettingsPage() {
         setZoteroLibId(s.zotero_library_id);
         setZoteroLibType(s.zotero_library_type);
         setBudget(s.cost_budget_usd.toString());
-        setBackend(s.llm_backend || "api");
+        setBackend(s.llm_backend || "cli");
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -176,12 +176,15 @@ export default function SettingsPage() {
           </button>
         </div>
         {backend === "cli" && (
-          <div className="mt-4 glass-subtle p-3">
+          <div className="mt-4 glass-subtle p-3 space-y-3">
+            <p className="text-xs text-white/60 font-medium">Setup CLI tools (one-time install)</p>
+            <pre className="text-xs text-[var(--accent-teal)] font-mono bg-black/20 rounded p-2 select-all leading-relaxed">{`npm install -g @anthropic-ai/claude-code   # claude
+npm install -g @openai/codex               # codex
+npm install -g @google/gemini-cli          # gemini`}</pre>
             <p className="text-xs text-white/40">
-              CLI tools required: <code className="text-[var(--accent-teal)]">codex</code>,{" "}
-              <code className="text-[var(--accent-teal)]">gemini</code>,{" "}
-              <code className="text-[var(--accent-teal)]">claude</code>.
-              Use &quot;Test Connections&quot; below to verify they are installed.
+              After installing, use{" "}
+              <span className="text-white/60">&quot;Test Connections&quot;</span>{" "}
+              below to verify each tool is accessible. No API keys required in CLI mode.
             </p>
           </div>
         )}
