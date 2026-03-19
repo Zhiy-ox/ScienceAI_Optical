@@ -51,9 +51,28 @@ class ResearchOrchestrator:
         graph_store=None,
         embedding_fn=None,
         zotero_client=None,
+        llm_backend: str | None = None,
     ) -> None:
+        from science_ai.config import settings
+
         self.cost_tracker = cost_tracker or CostTracker()
-        self.llm = LLMClient(cost_tracker=self.cost_tracker)
+
+        # Choose LLM backend: "cli" (free) or "api" (paid)
+        backend = llm_backend or settings.llm_backend
+        if backend == "cli":
+            from science_ai.services.cli_llm_client import CLILLMClient
+            self.llm = CLILLMClient(
+                cost_tracker=self.cost_tracker,
+                codex_cmd=settings.cli_codex_command,
+                gemini_cmd=settings.cli_gemini_command,
+                claude_cmd=settings.cli_claude_command,
+                timeout=settings.cli_timeout_seconds,
+            )
+            logger.info("Using CLI backend (free mode): codex + gemini + claude")
+        else:
+            self.llm = LLMClient(cost_tracker=self.cost_tracker)
+            logger.info("Using API backend (paid mode): litellm")
+
         self.search = search_service or PaperSearchService()
         self.router = model_router or ModelRouter()
         self.feedback = FeedbackController()

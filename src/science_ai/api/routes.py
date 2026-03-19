@@ -196,6 +196,7 @@ async def get_settings():
         zotero_api_key=_mask_key(settings.zotero_api_key),
         zotero_library_type=settings.zotero_library_type,
         cost_budget_usd=settings.cost_budget_usd,
+        llm_backend=settings.llm_backend,
     )
 
 
@@ -225,6 +226,7 @@ async def update_settings(update: SettingsUpdate):
         "zotero_api_key": "ZOTERO_API_KEY",
         "zotero_library_type": "ZOTERO_LIBRARY_TYPE",
         "cost_budget_usd": "COST_BUDGET_USD",
+        "llm_backend": "LLM_BACKEND",
     }
 
     for field_name, env_name in field_map.items():
@@ -246,6 +248,7 @@ async def update_settings(update: SettingsUpdate):
         zotero_api_key=_mask_key(settings.zotero_api_key),
         zotero_library_type=settings.zotero_library_type,
         cost_budget_usd=settings.cost_budget_usd,
+        llm_backend=settings.llm_backend,
     )
 
 
@@ -303,6 +306,17 @@ async def test_settings():
             results.append(ProviderTestResult(provider="google", ok=False, message=str(e)))
     else:
         results.append(ProviderTestResult(provider="google", ok=False, message="No API key configured"))
+
+    # Test CLI tools (if CLI backend is active)
+    if settings.llm_backend == "cli":
+        import shutil
+        for tool_name, cmd in [("codex", settings.cli_codex_command), ("gemini", settings.cli_gemini_command), ("claude", settings.cli_claude_command)]:
+            found = shutil.which(cmd)
+            results.append(ProviderTestResult(
+                provider=f"cli:{tool_name}",
+                ok=found is not None,
+                message=f"Found at {found}" if found else f"'{cmd}' not found in PATH",
+            ))
 
     # Test Zotero
     if settings.zotero_library_id and settings.zotero_api_key:

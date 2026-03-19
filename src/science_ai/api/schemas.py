@@ -92,6 +92,7 @@ class SettingsUpdate(BaseModel):
     zotero_api_key: str | None = None
     zotero_library_type: str | None = None
     cost_budget_usd: float | None = None
+    llm_backend: str | None = None  # "api" or "cli"
 
 
 class SettingsResponse(BaseModel):
@@ -103,6 +104,7 @@ class SettingsResponse(BaseModel):
     zotero_api_key: str
     zotero_library_type: str
     cost_budget_usd: float
+    llm_backend: str  # "api" or "cli"
 
 
 class ProviderTestResult(BaseModel):
