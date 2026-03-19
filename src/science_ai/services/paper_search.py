@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 SEMANTIC_SCHOLAR_BASE = "https://api.semanticscholar.org/graph/v1"
-ARXIV_BASE = "http://export.arxiv.org/api/query"
+ARXIV_BASE = "https://export.arxiv.org/api/query"
 OPENALEX_BASE = "https://api.openalex.org"
 
 
@@ -60,12 +61,21 @@ class SemanticScholarClient:
             params["fieldsOfStudy"] = ",".join(fields_of_study)
 
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                f"{SEMANTIC_SCHOLAR_BASE}/paper/search",
-                params=params,
-                headers=self.headers,
-            )
-            resp.raise_for_status()
+            for attempt in range(4):
+                resp = await client.get(
+                    f"{SEMANTIC_SCHOLAR_BASE}/paper/search",
+                    params=params,
+                    headers=self.headers,
+                )
+                if resp.status_code == 429:
+                    wait = 2 ** attempt  # 1, 2, 4, 8
+                    logger.warning("S2 rate-limited, retrying in %ds...", wait)
+                    await asyncio.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                break
+            else:
+                resp.raise_for_status()  # raise the last 429
 
         data = resp.json().get("data", [])
         return [self._to_paper_meta(p) for p in data if p.get("abstract")]
