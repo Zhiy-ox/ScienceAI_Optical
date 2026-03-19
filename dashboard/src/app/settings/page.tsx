@@ -28,6 +28,7 @@ export default function SettingsPage() {
   const [zoteroApiKey, setZoteroApiKey] = useState("");
   const [zoteroLibType, setZoteroLibType] = useState("user");
   const [budget, setBudget] = useState("10.00");
+  const [backend, setBackend] = useState<"api" | "cli">("api");
 
   useEffect(() => {
     api
@@ -37,6 +38,7 @@ export default function SettingsPage() {
         setZoteroLibId(s.zotero_library_id);
         setZoteroLibType(s.zotero_library_type);
         setBudget(s.cost_budget_usd.toString());
+        setBackend(s.llm_backend || "api");
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -61,6 +63,7 @@ export default function SettingsPage() {
       if (zoteroApiKey) update.zotero_api_key = zoteroApiKey;
       update.zotero_library_type = zoteroLibType;
       update.cost_budget_usd = parseFloat(budget) || 10.0;
+      update.llm_backend = backend;
 
       const updated = await api.updateSettings(update);
       setSettings(updated);
@@ -126,9 +129,72 @@ export default function SettingsPage() {
         </p>
       </div>
 
+      {/* LLM Backend Toggle */}
+      <GlassCard hover={false}>
+        <h3 className="text-base font-semibold text-white/80 mb-4">LLM Backend</h3>
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            type="button"
+            onClick={() => setBackend("cli")}
+            className={`glass-subtle p-5 text-left transition-all cursor-pointer ${
+              backend === "cli"
+                ? "border-[var(--accent-teal)] bg-white/[0.06]"
+                : "hover:bg-white/[0.03]"
+            }`}
+            style={backend === "cli" ? { borderColor: "var(--accent-teal)", borderWidth: 1 } : {}}
+          >
+            <div className="flex items-center gap-2 mb-2">
+              <span className={`text-sm font-semibold ${
+                backend === "cli" ? "text-[var(--accent-teal)]" : "text-white/70"
+              }`}>
+                CLI Mode
+              </span>
+              <span className="glass-badge badge-completed text-[10px]">FREE</span>
+            </div>
+            <p className="text-xs text-white/35">
+              Uses locally installed Gemini CLI, Codex CLI, and Claude Code via subprocess. No API costs.
+            </p>
+          </button>
+          <button
+            type="button"
+            onClick={() => setBackend("api")}
+            className={`glass-subtle p-5 text-left transition-all cursor-pointer ${
+              backend === "api"
+                ? "border-[var(--accent-blue)] bg-white/[0.06]"
+                : "hover:bg-white/[0.03]"
+            }`}
+            style={backend === "api" ? { borderColor: "var(--accent-blue)", borderWidth: 1 } : {}}
+          >
+            <span className={`text-sm font-semibold ${
+              backend === "api" ? "text-[var(--accent-blue)]" : "text-white/70"
+            }`}>
+              API Mode
+            </span>
+            <p className="text-xs text-white/35 mt-2">
+              Uses LLM provider APIs via litellm. Requires API keys. Faster, more reliable, costs money.
+            </p>
+          </button>
+        </div>
+        {backend === "cli" && (
+          <div className="mt-4 glass-subtle p-3">
+            <p className="text-xs text-white/40">
+              CLI tools required: <code className="text-[var(--accent-teal)]">codex</code>,{" "}
+              <code className="text-[var(--accent-teal)]">gemini</code>,{" "}
+              <code className="text-[var(--accent-teal)]">claude</code>.
+              Use &quot;Test Connections&quot; below to verify they are installed.
+            </p>
+          </div>
+        )}
+      </GlassCard>
+
       {/* LLM API Keys */}
       <GlassCard hover={false}>
-        <h3 className="text-base font-semibold text-white/80 mb-5">LLM API Keys</h3>
+        <h3 className="text-base font-semibold text-white/80 mb-5">
+          LLM API Keys
+          {backend === "cli" && (
+            <span className="text-xs text-white/25 font-normal ml-2">(not required in CLI mode)</span>
+          )}
+        </h3>
         <div className="space-y-4">
           <div>
             <label className="block text-sm text-white/60 mb-1">

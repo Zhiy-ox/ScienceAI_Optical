@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     zotero_api_key: str = ""
     zotero_library_type: str = "user"  # "user" or "group"
 
+    # LLM Backend: "api" (paid, via litellm) or "cli" (free, via local CLI tools)
+    llm_backend: str = "api"
+    cli_codex_command: str = "codex"
+    cli_gemini_command: str = "gemini"
+    cli_claude_command: str = "claude"
+    cli_timeout_seconds: int = 120
+
     # Cost budget (USD) — pipeline stops if exceeded
     cost_budget_usd: float = Field(default=10.0)
 
@@ -81,6 +88,37 @@ MODEL_PRICING: dict[str, dict] = {
         "context_window": 1_000_000,
         "max_output": 64_000,
         "supports_reasoning_effort": True,
+        "supports_tool_search": False,
+    },
+    # CLI backends (free — $0.00 per call)
+    "cli:codex": {
+        "provider": "cli",
+        "input_per_m": 0.0,
+        "output_per_m": 0.0,
+        "cached_input_per_m": 0.0,
+        "context_window": 200_000,
+        "max_output": 32_000,
+        "supports_reasoning_effort": False,
+        "supports_tool_search": False,
+    },
+    "cli:gemini": {
+        "provider": "cli",
+        "input_per_m": 0.0,
+        "output_per_m": 0.0,
+        "cached_input_per_m": 0.0,
+        "context_window": 1_000_000,
+        "max_output": 65_000,
+        "supports_reasoning_effort": False,
+        "supports_tool_search": False,
+    },
+    "cli:claude": {
+        "provider": "cli",
+        "input_per_m": 0.0,
+        "output_per_m": 0.0,
+        "cached_input_per_m": 0.0,
+        "context_window": 200_000,
+        "max_output": 128_000,
+        "supports_reasoning_effort": False,
         "supports_tool_search": False,
     },
 }

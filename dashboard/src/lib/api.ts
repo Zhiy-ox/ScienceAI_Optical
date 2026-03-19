@@ -78,6 +78,7 @@ export interface SettingsResponse {
   zotero_api_key: string;
   zotero_library_type: string;
   cost_budget_usd: number;
+  llm_backend: "api" | "cli";
 }
 
 export interface SettingsUpdate {
@@ -88,6 +89,7 @@ export interface SettingsUpdate {
   zotero_api_key?: string;
   zotero_library_type?: string;
   cost_budget_usd?: number;
+  llm_backend?: "api" | "cli";
 }
 
 export interface ProviderTestResult {
