@@ -239,8 +239,7 @@ class CLILLMClient:
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            # For gemini, send prompt via stdin
-            stdin_data = prompt.encode() if cli_tool == "gemini" else None
+            stdin_data = None
 
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(input=stdin_data),
@@ -278,11 +277,11 @@ class CLILLMClient:
     def _build_command(self, cli_tool: str, prompt: str) -> list[str]:
         """Build the subprocess command for each CLI tool."""
         if cli_tool == "codex":
-            # codex --quiet --prompt "..."
-            return [self.codex_cmd, "--quiet", "--prompt", prompt]
+            # codex exec "..." — non-interactive mode
+            return [self.codex_cmd, "exec", "--approval", "never", prompt]
         elif cli_tool == "gemini":
-            # gemini reads from stdin
-            return [self.gemini_cmd]
+            # gemini in non-interactive (headless) mode with positional prompt
+            return [self.gemini_cmd, prompt]
         elif cli_tool == "claude":
             # claude --print -p "..."
             return [self.claude_cmd, "--print", "-p", prompt]
