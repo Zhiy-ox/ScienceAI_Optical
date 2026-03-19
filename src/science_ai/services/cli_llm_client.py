@@ -278,7 +278,7 @@ class CLILLMClient:
         """Build the subprocess command for each CLI tool."""
         if cli_tool == "codex":
             # codex exec "..." — non-interactive mode
-            return [self.codex_cmd, "exec", "--approval", "never", prompt]
+            return [self.codex_cmd, "exec", "--full-auto", prompt]
         elif cli_tool == "gemini":
             # gemini in non-interactive (headless) mode with positional prompt
             return [self.gemini_cmd, prompt]
