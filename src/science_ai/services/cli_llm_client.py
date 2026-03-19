@@ -226,7 +226,7 @@ class CLILLMClient:
 
     async def _run_cli(self, cli_tool: str, prompt: str) -> str:
         """Execute a CLI tool with the given prompt and return stdout."""
-        cmd = self._build_command(cli_tool, prompt)
+        cmd, use_stdin = self._build_command(cli_tool, prompt)
 
         logger.debug("Running CLI command: %s (prompt_len=%d)", cmd[0], len(prompt))
         start = time.monotonic()
@@ -239,7 +239,7 @@ class CLILLMClient:
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            stdin_data = None
+            stdin_data = prompt.encode() if use_stdin else None
 
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(input=stdin_data),
@@ -274,17 +274,21 @@ class CLILLMClient:
                 pass
             raise RuntimeError(f"CLI {cli_tool} timed out after {self.timeout}s")
 
-    def _build_command(self, cli_tool: str, prompt: str) -> list[str]:
-        """Build the subprocess command for each CLI tool."""
+    def _build_command(self, cli_tool: str, prompt: str) -> tuple[list[str], bool]:
+        """Build the subprocess command for each CLI tool.
+
+        Returns (command, use_stdin). When use_stdin is True, the prompt
+        is sent via stdin instead of as a command-line argument.
+        """
         if cli_tool == "codex":
-            # codex exec "..." — non-interactive mode
-            return [self.codex_cmd, "exec", "--full-auto", prompt]
+            # codex exec — non-interactive mode; prompt via stdin for large inputs
+            return [self.codex_cmd, "exec", "--full-auto", "-"], True
         elif cli_tool == "gemini":
-            # gemini in non-interactive (headless) mode with positional prompt
-            return [self.gemini_cmd, prompt]
+            # gemini reads prompt from stdin in non-interactive/headless mode
+            return [self.gemini_cmd], True
         elif cli_tool == "claude":
-            # claude --print -p "..."
-            return [self.claude_cmd, "--print", "-p", prompt]
+            # claude --print -p "..." — accepts prompt as argument
+            return [self.claude_cmd, "--print", "-p", prompt], False
         else:
             raise ValueError(f"Unknown CLI tool: {cli_tool}")
 
