@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -41,7 +40,6 @@ class SessionRepository:
             row = await db.get(ResearchSession, session_id)
             if row:
                 row.status = status
-                row.updated_at = datetime.now(tz=timezone.utc)
                 await db.commit()
 
     async def update_result(
@@ -57,7 +55,6 @@ class SessionRepository:
                 row.result = result
                 row.cost_records = cost_records
                 row.status = "completed"
-                row.updated_at = datetime.now(tz=timezone.utc)
                 await db.commit()
         logger.info("Persisted result for session %s", session_id)
 

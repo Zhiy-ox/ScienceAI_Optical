@@ -22,6 +22,7 @@ from science_ai.api.schemas import (
     StartResearchRequest,
     ZoteroCollection,
 )
+from science_ai.config import MODEL_PRICING
 from science_ai.cost.tracker import CostTracker
 from science_ai.orchestrator.orchestrator import ResearchOrchestrator
 from science_ai.storage.database import async_session_factory
@@ -127,50 +128,41 @@ async def get_session_cost(session_id: str):
         summary = tracker.session_summary(session_id)
     elif session.cost_records:
         records = session.cost_records
-        total = sum(r.get("cost_usd", 0.0) for r in records)
         by_model: dict[str, float] = {}
         for r in records:
             by_model[r["model"]] = by_model.get(r["model"], 0.0) + r.get("cost_usd", 0.0)
         summary = {
-            "total_usd": round(total, 4),
+            "total_usd": round(sum(by_model.values()), 4),
             "by_model": {k: round(v, 4) for k, v in by_model.items()},
             "call_count": len(records),
         }
     else:
         raise HTTPException(status_code=404, detail="No cost data for session")
 
-    # Group costs by agent
     by_agent: dict[str, float] = {}
-    total_cached_tokens = 0
+    cache_savings = 0.0
+    calls = []
     for r in records:
         by_agent[r["agent"]] = by_agent.get(r["agent"], 0.0) + r["cost_usd"]
-        total_cached_tokens += r.get("cached_tokens", 0)
-
-    # Estimate cache savings
-    cache_savings = 0.0
-    for r in records:
-        from science_ai.config import MODEL_PRICING
-        pricing = MODEL_PRICING.get(r["model"], {})
-        if pricing and r.get("cached_tokens", 0) > 0:
-            full_rate = pricing.get("input_per_m", 0)
-            cached_rate = pricing.get("cached_input_per_m", 0)
-            savings = (r["cached_tokens"] / 1_000_000) * (full_rate - cached_rate)
-            cache_savings += savings
-
-    calls = [
-        CostDetail(
+        cached = r.get("cached_tokens", 0)
+        if cached:
+            pricing = MODEL_PRICING.get(r["model"], {})
+            if pricing:
+                # Cached tokens are billed at a lower rate; savings = difference * tokens
+                cache_savings += (cached / 1_000_000) * (
+                    pricing.get("input_per_m", 0) - pricing.get("cached_input_per_m", 0)
+                )
+        calls.append(CostDetail(
             call_id=r["call_id"],
             agent=r["agent"],
             model=r["model"],
             reasoning_effort=r["reasoning_effort"],
             input_tokens=r["input_tokens"],
             output_tokens=r["output_tokens"],
-            cached_tokens=r["cached_tokens"],
+            cached_tokens=cached,
             cost_usd=r["cost_usd"],
             timestamp=r["timestamp"],
-        )
-        for r in records
-    ]
+        ))
 
     return DetailedCostReport(
         session_id=session_id,

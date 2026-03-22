@@ -38,11 +38,8 @@ def _mock_repo(
 ):
     """Return an AsyncMock shaped like SessionRepository."""
     repo = AsyncMock()
-    repo.create_session = AsyncMock(return_value=None)
-    repo.update_status = AsyncMock(return_value=None)
-    repo.update_result = AsyncMock(return_value=None)
-    repo.get_session = AsyncMock(return_value=get_session_return)
-    repo.list_sessions = AsyncMock(return_value=list_sessions_return or [])
+    repo.get_session.return_value = get_session_return
+    repo.list_sessions.return_value = list_sessions_return or []
     return repo
 
 
