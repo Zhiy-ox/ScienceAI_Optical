@@ -22,15 +22,17 @@ from science_ai.api.schemas import (
     StartResearchRequest,
     ZoteroCollection,
 )
+from science_ai.config import MODEL_PRICING
 from science_ai.cost.tracker import CostTracker
 from science_ai.orchestrator.orchestrator import ResearchOrchestrator
+from science_ai.storage.database import async_session_factory
+from science_ai.storage.session_repo import SessionRepository
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# In-memory session store (will move to Redis/DB later)
-_sessions: dict[str, dict] = {}
+_session_repo = SessionRepository(async_session_factory)
 _cost_trackers: dict[str, CostTracker] = {}
 
 
@@ -47,12 +49,7 @@ async def start_research(
     """Start a new research session. The pipeline runs in the background."""
     session_id = str(uuid.uuid4())
 
-    _sessions[session_id] = {
-        "status": "running",
-        "question": request.question,
-        "phase": request.phase,
-        "result": None,
-    }
+    await _session_repo.create_session(session_id, request.question, request.phase)
     _cost_trackers[session_id] = CostTracker()
 
     background_tasks.add_task(
@@ -71,7 +68,7 @@ async def start_research(
 @router.get("/research/{session_id}/status", response_model=SessionStatus)
 async def get_session_status(session_id: str):
     """Check the status of a research session."""
-    session = _sessions.get(session_id)
+    session = await _session_repo.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -80,7 +77,7 @@ async def get_session_status(session_id: str):
 
     return SessionStatus(
         session_id=session_id,
-        status=session["status"],
+        status=session.status,
         cost_so_far=round(cost, 4),
     )
 
@@ -88,14 +85,14 @@ async def get_session_status(session_id: str):
 @router.get("/research/{session_id}/results", response_model=ResearchResult)
 async def get_session_results(session_id: str):
     """Get the results of a completed research session."""
-    session = _sessions.get(session_id)
+    session = await _session_repo.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if session["status"] == "running":
+    if session.status == "running":
         raise HTTPException(status_code=202, detail="Pipeline still running")
 
-    result = session.get("result", {})
+    result = session.result or {}
     if not result:
         raise HTTPException(status_code=500, detail="Pipeline failed with no result")
 
@@ -119,50 +116,53 @@ async def get_session_results(session_id: str):
 @router.get("/research/{session_id}/cost", response_model=DetailedCostReport)
 async def get_session_cost(session_id: str):
     """Get detailed cost report for a research session."""
-    session = _sessions.get(session_id)
+    session = await _session_repo.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
     tracker = _cost_trackers.get(session_id)
-    if not tracker:
+
+    # Fall back to stored cost records when the in-memory tracker is gone (e.g. after restart)
+    if tracker:
+        records = tracker.all_records_for_session(session_id)
+        summary = tracker.session_summary(session_id)
+    elif session.cost_records:
+        records = session.cost_records
+        by_model: dict[str, float] = {}
+        for r in records:
+            by_model[r["model"]] = by_model.get(r["model"], 0.0) + r.get("cost_usd", 0.0)
+        summary = {
+            "total_usd": round(sum(by_model.values()), 4),
+            "by_model": {k: round(v, 4) for k, v in by_model.items()},
+            "call_count": len(records),
+        }
+    else:
         raise HTTPException(status_code=404, detail="No cost data for session")
 
-    records = tracker.all_records_for_session(session_id)
-    summary = tracker.session_summary(session_id)
-
-    # Group costs by agent
     by_agent: dict[str, float] = {}
-    total_cached_tokens = 0
+    cache_savings = 0.0
+    calls = []
     for r in records:
         by_agent[r["agent"]] = by_agent.get(r["agent"], 0.0) + r["cost_usd"]
-        total_cached_tokens += r.get("cached_tokens", 0)
-
-    # Estimate cache savings (cached tokens charged at ~10% of input rate)
-    # Savings = cached_tokens * (full_rate - cached_rate) / 1M
-    cache_savings = 0.0
-    for r in records:
-        from science_ai.config import MODEL_PRICING
-        pricing = MODEL_PRICING.get(r["model"], {})
-        if pricing and r.get("cached_tokens", 0) > 0:
-            full_rate = pricing.get("input_per_m", 0)
-            cached_rate = pricing.get("cached_input_per_m", 0)
-            savings = (r["cached_tokens"] / 1_000_000) * (full_rate - cached_rate)
-            cache_savings += savings
-
-    calls = [
-        CostDetail(
+        cached = r.get("cached_tokens", 0)
+        if cached:
+            pricing = MODEL_PRICING.get(r["model"], {})
+            if pricing:
+                # Cached tokens are billed at a lower rate; savings = difference * tokens
+                cache_savings += (cached / 1_000_000) * (
+                    pricing.get("input_per_m", 0) - pricing.get("cached_input_per_m", 0)
+                )
+        calls.append(CostDetail(
             call_id=r["call_id"],
             agent=r["agent"],
             model=r["model"],
             reasoning_effort=r["reasoning_effort"],
             input_tokens=r["input_tokens"],
             output_tokens=r["output_tokens"],
-            cached_tokens=r["cached_tokens"],
+            cached_tokens=cached,
             cost_usd=r["cost_usd"],
             timestamp=r["timestamp"],
-        )
-        for r in records
-    ]
+        ))
 
     return DetailedCostReport(
         session_id=session_id,
@@ -342,15 +342,15 @@ async def test_settings():
 @router.get("/sessions", response_model=list[SessionListItem])
 async def list_sessions():
     """List all research sessions."""
-    tracker_map = _cost_trackers
+    sessions = await _session_repo.list_sessions()
     items = []
-    for sid, sess in _sessions.items():
-        tracker = tracker_map.get(sid)
-        cost = tracker.session_total(sid) if tracker else 0.0
+    for sess in sessions:
+        tracker = _cost_trackers.get(sess.session_id)
+        cost = tracker.session_total(sess.session_id) if tracker else 0.0
         items.append(SessionListItem(
-            session_id=sid,
-            status=sess["status"],
-            question=sess.get("question", ""),
+            session_id=sess.session_id,
+            status=sess.status,
+            question=sess.question,
             cost_so_far=round(cost, 4),
         ))
     return items
@@ -436,9 +436,9 @@ async def _run_pipeline(
                 max_papers_to_read=max_papers,
                 source=source,
             )
-        _sessions[session_id]["result"] = result
-        _sessions[session_id]["status"] = "completed"
+        await _session_repo.update_result(
+            session_id, result, tracker.all_records_for_session(session_id)
+        )
     except Exception:
         logger.exception("Pipeline failed for session %s", session_id)
-        _sessions[session_id]["status"] = "failed"
-        _sessions[session_id]["result"] = {"status": "failed"}
+        await _session_repo.update_status(session_id, "failed")
