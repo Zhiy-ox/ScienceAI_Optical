@@ -31,7 +31,7 @@ Scoring guidelines:
 Output a JSON object with key "results" containing an array of assessments.
 """
 
-BATCH_SIZE = 50
+BATCH_SIZE = 20
 
 
 class PaperTriage(BaseAgent):

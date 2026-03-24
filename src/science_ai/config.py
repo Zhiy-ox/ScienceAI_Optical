@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     cli_codex_command: str = "codex"
     cli_gemini_command: str = "gemini"
     cli_claude_command: str = "claude"
-    cli_timeout_seconds: int = 120
+    cli_timeout_seconds: int = 240
 
     # Cost budget (USD) — pipeline stops if exceeded
     cost_budget_usd: float = Field(default=10.0)
