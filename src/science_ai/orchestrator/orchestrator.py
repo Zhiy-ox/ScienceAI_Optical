@@ -99,34 +99,42 @@ class ResearchOrchestrator:
         # Step 1: Query Planning
         logger.info("Step 1: Query Planning")
         self.monitor.start_step(session_id, 1, "Query Planning")
-        planner = QueryPlanner(self.llm, session_id=session_id)
-        plan = await planner.run(question=question)
-        self.monitor.finish_step(session_id, 1)
+        try:
+            planner = QueryPlanner(self.llm, session_id=session_id)
+            plan = await planner.run(question=question)
+            self.monitor.finish_step(session_id, 1)
+        except Exception as exc:
+            self.monitor.finish_step(session_id, 1, status="failed", error=str(exc))
+            raise
 
         # Step 2: Paper Search
         logger.info("Step 2: Paper Search")
         self.monitor.start_step(session_id, 2, "Paper Search")
-        all_papers = []
+        try:
+            all_papers = []
 
-        # Fetch from web sources
-        if source in ("web", "both"):
-            all_papers = await self._execute_search(plan)
+            # Fetch from web sources
+            if source in ("web", "both"):
+                all_papers = await self._execute_search(plan)
 
-        # Fetch from Zotero
-        if source in ("zotero", "both") and self.zotero_client:
-            try:
-                zotero_papers = self.zotero_client.search(question, limit=50)
-                # Deduplicate against existing papers
-                seen_titles = {p.title.lower().strip() for p in all_papers}
-                for zp in zotero_papers:
-                    if zp.title.lower().strip() not in seen_titles:
-                        all_papers.append(zp)
-                        seen_titles.add(zp.title.lower().strip())
-                logger.info("Added %d papers from Zotero", len(zotero_papers))
-            except Exception:
-                logger.exception("Zotero search failed")
-        logger.info("Found %d unique papers", len(all_papers))
-        self.monitor.finish_step(session_id, 2)
+            # Fetch from Zotero
+            if source in ("zotero", "both") and self.zotero_client:
+                try:
+                    zotero_papers = self.zotero_client.search(question, limit=50)
+                    # Deduplicate against existing papers
+                    seen_titles = {p.title.lower().strip() for p in all_papers}
+                    for zp in zotero_papers:
+                        if zp.title.lower().strip() not in seen_titles:
+                            all_papers.append(zp)
+                            seen_titles.add(zp.title.lower().strip())
+                    logger.info("Added %d papers from Zotero", len(zotero_papers))
+                except Exception:
+                    logger.exception("Zotero search failed")
+            logger.info("Found %d unique papers", len(all_papers))
+            self.monitor.finish_step(session_id, 2)
+        except Exception as exc:
+            self.monitor.finish_step(session_id, 2, status="failed", error=str(exc))
+            raise
 
         if not all_papers:
             return {
@@ -141,16 +149,19 @@ class ResearchOrchestrator:
         # Step 3: Paper Triage
         logger.info("Step 3: Paper Triage")
         self.monitor.start_step(session_id, 3, "Paper Triage")
-        triage_agent = PaperTriage(self.llm, session_id=session_id)
-        papers_for_triage = [
-            {"paper_id": p.paper_id, "title": p.title, "abstract": p.abstract}
-            for p in all_papers
-        ]
-        triage_results = await triage_agent.run(
-            question=question, papers=papers_for_triage
-        )
-
-        self.monitor.finish_step(session_id, 3)
+        try:
+            triage_agent = PaperTriage(self.llm, session_id=session_id)
+            papers_for_triage = [
+                {"paper_id": p.paper_id, "title": p.title, "abstract": p.abstract}
+                for p in all_papers
+            ]
+            triage_results = await triage_agent.run(
+                question=question, papers=papers_for_triage
+            )
+            self.monitor.finish_step(session_id, 3)
+        except Exception as exc:
+            self.monitor.finish_step(session_id, 3, status="failed", error=str(exc))
+            raise
 
         # Sort by relevance and pick top papers for deep reading
         must_read = [r for r in triage_results if r.get("priority") == "must_read"]
@@ -164,28 +175,32 @@ class ResearchOrchestrator:
         # Step 4: Deep Reading
         logger.info("Step 4: Deep Reading (%d papers)", len(papers_to_read))
         self.monitor.start_step(session_id, 4, "Deep Reading")
-        reader = DeepReader(self.llm, session_id=session_id)
-        knowledge_objects = []
-        paper_lookup = {p.paper_id: p for p in all_papers}
+        try:
+            reader = DeepReader(self.llm, session_id=session_id)
+            knowledge_objects = []
+            paper_lookup = {p.paper_id: p for p in all_papers}
 
-        for triage in papers_to_read:
-            pid = triage.get("paper_id", "")
-            paper = paper_lookup.get(pid)
-            if not paper:
-                continue
+            for triage in papers_to_read:
+                pid = triage.get("paper_id", "")
+                paper = paper_lookup.get(pid)
+                if not paper:
+                    continue
 
-            priority = "high" if triage.get("priority") == "must_read" else "medium"
-            text = paper.abstract or ""
+                priority = "high" if triage.get("priority") == "must_read" else "medium"
+                text = paper.abstract or ""
 
-            try:
-                ko = await reader.run(
-                    paper_text=text, paper_id=pid, title=paper.title, priority=priority,
-                )
-                knowledge_objects.append(ko)
-            except Exception:
-                logger.exception("Failed to deep-read paper %s", pid)
+                try:
+                    ko = await reader.run(
+                        paper_text=text, paper_id=pid, title=paper.title, priority=priority,
+                    )
+                    knowledge_objects.append(ko)
+                except Exception:
+                    logger.exception("Failed to deep-read paper %s", pid)
 
-        self.monitor.finish_step(session_id, 4)
+            self.monitor.finish_step(session_id, 4)
+        except Exception as exc:
+            self.monitor.finish_step(session_id, 4, status="failed", error=str(exc))
+            raise
 
         # --- Feedback Loop 1: Search Refinement ---
         knowledge_objects, all_papers, triage_results = await self._search_refinement_loop(
@@ -253,15 +268,19 @@ class ResearchOrchestrator:
         # Step 5: Critique Agent — critical analysis of deep-read papers
         logger.info("Step 5: Critique (%d papers)", len(knowledge_objects))
         self.monitor.start_step(session_id, 5, "Critique")
-        critique_agent = CritiqueAgent(self.llm, session_id=session_id)
-        critiques = []
-        for ko in knowledge_objects:
-            try:
-                critique = await critique_agent.run(knowledge_obj=ko)
-                critiques.append(critique)
-            except Exception:
-                logger.exception("Failed to critique paper %s", ko.get("paper_id"))
-        self.monitor.finish_step(session_id, 5)
+        try:
+            critique_agent = CritiqueAgent(self.llm, session_id=session_id)
+            critiques = []
+            for ko in knowledge_objects:
+                try:
+                    critique = await critique_agent.run(knowledge_obj=ko)
+                    critiques.append(critique)
+                except Exception:
+                    logger.exception("Failed to critique paper %s", ko.get("paper_id"))
+            self.monitor.finish_step(session_id, 5)
+        except Exception as exc:
+            self.monitor.finish_step(session_id, 5, status="failed", error=str(exc))
+            raise
 
         # Index into vector store if available
         if self.vector_store and self.embedding_fn:
@@ -284,26 +303,34 @@ class ResearchOrchestrator:
         # Step 6: Gap Detection (all 4 mechanisms + LLM synthesis)
         logger.info("Step 6: Gap Detection")
         self.monitor.start_step(session_id, 6, "Gap Detection")
-        gap_detector = GapDetector(
-            self.llm,
-            session_id=session_id,
-            embedding_fn=self.embedding_fn,
-            graph_store=self.graph_store,
-        )
-        gaps = await gap_detector.run(
-            knowledge_objects=knowledge_objects,
-            critiques=critiques,
-        )
-        self.monitor.finish_step(session_id, 6)
+        try:
+            gap_detector = GapDetector(
+                self.llm,
+                session_id=session_id,
+                embedding_fn=self.embedding_fn,
+                graph_store=self.graph_store,
+            )
+            gaps = await gap_detector.run(
+                knowledge_objects=knowledge_objects,
+                critiques=critiques,
+            )
+            self.monitor.finish_step(session_id, 6)
+        except Exception as exc:
+            self.monitor.finish_step(session_id, 6, status="failed", error=str(exc))
+            raise
 
         # Step 7: Verification Agent — verify gap novelty
         logger.info("Step 7: Verification (%d gaps)", len(gaps))
         self.monitor.start_step(session_id, 7, "Gap Verification")
-        verifier = VerificationAgent(
-            self.llm, session_id=session_id, search_service=self.search
-        )
-        verification_results = await verifier.run(gaps=gaps)
-        self.monitor.finish_step(session_id, 7)
+        try:
+            verifier = VerificationAgent(
+                self.llm, session_id=session_id, search_service=self.search
+            )
+            verification_results = await verifier.run(gaps=gaps)
+            self.monitor.finish_step(session_id, 7)
+        except Exception as exc:
+            self.monitor.finish_step(session_id, 7, status="failed", error=str(exc))
+            raise
 
         # --- Feedback Loop 2: Gap Re-detection ---
         if self.feedback.should_retry_gap_detection(session_id, verification_results):
@@ -380,19 +407,24 @@ class ResearchOrchestrator:
         # Step 8: Idea Generation
         logger.info("Step 8: Idea Generation (%d verified gaps)", len(verified_gaps))
         self.monitor.start_step(session_id, 8, "Idea Generation")
-        idea_gen = IdeaGenerator(self.llm, session_id=session_id)
-        ideas = await idea_gen.run(
-            verified_gaps=verified_gaps,
-            knowledge_objects=knowledge_objects,
-            user_background=user_background,
-        )
-        self.monitor.finish_step(session_id, 8)
+        try:
+            idea_gen = IdeaGenerator(self.llm, session_id=session_id)
+            ideas = await idea_gen.run(
+                verified_gaps=verified_gaps,
+                knowledge_objects=knowledge_objects,
+                user_background=user_background,
+            )
+            self.monitor.finish_step(session_id, 8)
+        except Exception as exc:
+            self.monitor.finish_step(session_id, 8, status="failed", error=str(exc))
+            raise
 
         # Step 9: Experiment Planning + Feedback Loop 3
         logger.info("Step 9: Experiment Planning (%d ideas)", len(ideas))
         self.monitor.start_step(session_id, 9, "Experiment Planning")
         exp_planner = ExperimentPlanner(self.llm, session_id=session_id)
         experiment_plans: list[dict[str, Any]] = []
+        _step9_error: str | None = None
 
         for idea in ideas:
             try:
@@ -420,10 +452,11 @@ class ResearchOrchestrator:
                         )
 
                 experiment_plans.append(plan)
-            except Exception:
+            except Exception as exc:
+                _step9_error = str(exc)
                 logger.exception("Failed to plan experiment for idea '%s'", idea.get("title", ""))
 
-        self.monitor.finish_step(session_id, 9)
+        self.monitor.finish_step(session_id, 9, error=_step9_error)
 
         # Step 10: Report Generation
         logger.info("Step 10: Report Generation")
@@ -442,8 +475,9 @@ class ResearchOrchestrator:
                 experiment_plans=experiment_plans,
                 cost_summary=cost_summary,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to generate report")
+            self.monitor.finish_step(session_id, 10, status="failed", error=str(exc))
             report = None
 
         # Export to Zotero if client is configured

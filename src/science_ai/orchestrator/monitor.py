@@ -13,6 +13,7 @@ class StepRecord:
     started_at: float
     finished_at: float | None = None
     status: str = "running"  # "running" | "done" | "skipped" | "failed"
+    error: str | None = None
 
 
 @dataclass
@@ -47,12 +48,14 @@ class PipelineMonitor:
         step_number: int,
         *,
         status: str = "done",
+        error: str | None = None,
     ) -> None:
-        """Mark a step as finished."""
+        """Mark a step as finished. Pass ``error`` when ``status='failed'``."""
         for record in reversed(self._sessions.get(session_id, [])):
             if record.step_number == step_number and record.finished_at is None:
                 record.finished_at = time.time()
                 record.status = status
+                record.error = error
                 return
 
     def skip_step(self, session_id: str, step_number: int, step_name: str) -> None:
@@ -98,6 +101,7 @@ class PipelineMonitor:
                     if r.finished_at is not None
                     else round(time.time() - r.started_at, 2)
                 ),
+                "error": r.error,
             }
             for r in records
         ]

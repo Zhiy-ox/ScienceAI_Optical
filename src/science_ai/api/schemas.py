@@ -135,6 +135,7 @@ class StepProgress(BaseModel):
     started_at: float
     finished_at: float | None = None
     duration_seconds: float
+    error: str | None = None
 
 
 class PipelineProgress(BaseModel):
