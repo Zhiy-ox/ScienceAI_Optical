@@ -11,6 +11,7 @@ from science_ai.api.schemas import (
     CostDetail,
     DetailedCostReport,
     HealthResponse,
+    PipelineProgress,
     ProviderTestResult,
     ResearchResult,
     SessionCreated,
@@ -24,6 +25,7 @@ from science_ai.api.schemas import (
 )
 from science_ai.config import MODEL_PRICING
 from science_ai.cost.tracker import CostTracker
+from science_ai.orchestrator.monitor import PipelineMonitor
 from science_ai.orchestrator.orchestrator import ResearchOrchestrator
 from science_ai.storage.database import async_session_factory
 from science_ai.storage.session_repo import SessionRepository
@@ -34,6 +36,7 @@ router = APIRouter()
 
 _session_repo = SessionRepository(async_session_factory)
 _cost_trackers: dict[str, CostTracker] = {}
+_monitor = PipelineMonitor()
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -79,6 +82,23 @@ async def get_session_status(session_id: str):
         session_id=session_id,
         status=session.status,
         cost_so_far=round(cost, 4),
+    )
+
+
+@router.get("/research/{session_id}/progress", response_model=PipelineProgress)
+async def get_session_progress(session_id: str):
+    """Return real-time pipeline step progress for a running (or completed) session."""
+    session = await _session_repo.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    snapshot = _monitor.snapshot(session_id)
+    return PipelineProgress(
+        session_id=session_id,
+        current_step=snapshot["current_step"],
+        current_step_number=snapshot["current_step_number"],
+        elapsed_seconds=snapshot["elapsed_seconds"],
+        steps=snapshot["steps"],
     )
 
 
@@ -411,6 +431,7 @@ async def _run_pipeline(
         cost_tracker=tracker,
         graph_store=graph_store,
         zotero_client=zotero_client,
+        monitor=_monitor,
     )
 
     try:

@@ -126,6 +126,25 @@ class SessionListItem(BaseModel):
     cost_so_far: float
 
 
+# -- Pipeline progress --
+
+class StepProgress(BaseModel):
+    step_number: int
+    step_name: str
+    status: str  # "running" | "done" | "skipped" | "failed"
+    started_at: float
+    finished_at: float | None = None
+    duration_seconds: float
+
+
+class PipelineProgress(BaseModel):
+    session_id: str
+    current_step: str | None = None
+    current_step_number: int | None = None
+    elapsed_seconds: float | None = None
+    steps: list[StepProgress] = []
+
+
 # -- Zotero --
 
 class ZoteroCollection(BaseModel):

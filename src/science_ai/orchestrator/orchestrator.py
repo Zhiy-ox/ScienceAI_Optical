@@ -18,6 +18,7 @@ from science_ai.agents.verification import VerificationAgent
 from science_ai.cost.tracker import CostTracker
 from science_ai.orchestrator.feedback import FeedbackController
 from science_ai.orchestrator.model_router import ModelRouter
+from science_ai.orchestrator.monitor import PipelineMonitor
 from science_ai.services.llm_client import LLMClient
 from science_ai.services.paper_search import PaperSearchService
 
@@ -52,6 +53,7 @@ class ResearchOrchestrator:
         embedding_fn=None,
         zotero_client=None,
         llm_backend: str | None = None,
+        monitor: PipelineMonitor | None = None,
     ) -> None:
         from science_ai.config import settings
 
@@ -76,6 +78,7 @@ class ResearchOrchestrator:
         self.search = search_service or PaperSearchService()
         self.router = model_router or ModelRouter()
         self.feedback = FeedbackController()
+        self.monitor = monitor or PipelineMonitor()
         self.vector_store = vector_store
         self.graph_store = graph_store
         self.embedding_fn = embedding_fn
@@ -95,11 +98,14 @@ class ResearchOrchestrator:
 
         # Step 1: Query Planning
         logger.info("Step 1: Query Planning")
+        self.monitor.start_step(session_id, 1, "Query Planning")
         planner = QueryPlanner(self.llm, session_id=session_id)
         plan = await planner.run(question=question)
+        self.monitor.finish_step(session_id, 1)
 
         # Step 2: Paper Search
         logger.info("Step 2: Paper Search")
+        self.monitor.start_step(session_id, 2, "Paper Search")
         all_papers = []
 
         # Fetch from web sources
@@ -120,6 +126,7 @@ class ResearchOrchestrator:
             except Exception:
                 logger.exception("Zotero search failed")
         logger.info("Found %d unique papers", len(all_papers))
+        self.monitor.finish_step(session_id, 2)
 
         if not all_papers:
             return {
@@ -133,6 +140,7 @@ class ResearchOrchestrator:
 
         # Step 3: Paper Triage
         logger.info("Step 3: Paper Triage")
+        self.monitor.start_step(session_id, 3, "Paper Triage")
         triage_agent = PaperTriage(self.llm, session_id=session_id)
         papers_for_triage = [
             {"paper_id": p.paper_id, "title": p.title, "abstract": p.abstract}
@@ -141,6 +149,8 @@ class ResearchOrchestrator:
         triage_results = await triage_agent.run(
             question=question, papers=papers_for_triage
         )
+
+        self.monitor.finish_step(session_id, 3)
 
         # Sort by relevance and pick top papers for deep reading
         must_read = [r for r in triage_results if r.get("priority") == "must_read"]
@@ -153,6 +163,7 @@ class ResearchOrchestrator:
 
         # Step 4: Deep Reading
         logger.info("Step 4: Deep Reading (%d papers)", len(papers_to_read))
+        self.monitor.start_step(session_id, 4, "Deep Reading")
         reader = DeepReader(self.llm, session_id=session_id)
         knowledge_objects = []
         paper_lookup = {p.paper_id: p for p in all_papers}
@@ -173,6 +184,8 @@ class ResearchOrchestrator:
                 knowledge_objects.append(ko)
             except Exception:
                 logger.exception("Failed to deep-read paper %s", pid)
+
+        self.monitor.finish_step(session_id, 4)
 
         # --- Feedback Loop 1: Search Refinement ---
         knowledge_objects, all_papers, triage_results = await self._search_refinement_loop(
@@ -239,6 +252,7 @@ class ResearchOrchestrator:
 
         # Step 5: Critique Agent — critical analysis of deep-read papers
         logger.info("Step 5: Critique (%d papers)", len(knowledge_objects))
+        self.monitor.start_step(session_id, 5, "Critique")
         critique_agent = CritiqueAgent(self.llm, session_id=session_id)
         critiques = []
         for ko in knowledge_objects:
@@ -247,6 +261,7 @@ class ResearchOrchestrator:
                 critiques.append(critique)
             except Exception:
                 logger.exception("Failed to critique paper %s", ko.get("paper_id"))
+        self.monitor.finish_step(session_id, 5)
 
         # Index into vector store if available
         if self.vector_store and self.embedding_fn:
@@ -268,6 +283,7 @@ class ResearchOrchestrator:
 
         # Step 6: Gap Detection (all 4 mechanisms + LLM synthesis)
         logger.info("Step 6: Gap Detection")
+        self.monitor.start_step(session_id, 6, "Gap Detection")
         gap_detector = GapDetector(
             self.llm,
             session_id=session_id,
@@ -278,13 +294,16 @@ class ResearchOrchestrator:
             knowledge_objects=knowledge_objects,
             critiques=critiques,
         )
+        self.monitor.finish_step(session_id, 6)
 
         # Step 7: Verification Agent — verify gap novelty
         logger.info("Step 7: Verification (%d gaps)", len(gaps))
+        self.monitor.start_step(session_id, 7, "Gap Verification")
         verifier = VerificationAgent(
             self.llm, session_id=session_id, search_service=self.search
         )
         verification_results = await verifier.run(gaps=gaps)
+        self.monitor.finish_step(session_id, 7)
 
         # --- Feedback Loop 2: Gap Re-detection ---
         if self.feedback.should_retry_gap_detection(session_id, verification_results):
@@ -351,6 +370,8 @@ class ResearchOrchestrator:
 
         if not verified_gaps:
             logger.warning("No verified gaps found — skipping idea generation")
+            for step_num, step_name in [(8, "Idea Generation"), (9, "Experiment Planning"), (10, "Report Generation")]:
+                self.monitor.skip_step(session_id, step_num, step_name)
             phase2_result["ideas"] = []
             phase2_result["experiment_plans"] = []
             phase2_result["report"] = None
@@ -358,15 +379,18 @@ class ResearchOrchestrator:
 
         # Step 8: Idea Generation
         logger.info("Step 8: Idea Generation (%d verified gaps)", len(verified_gaps))
+        self.monitor.start_step(session_id, 8, "Idea Generation")
         idea_gen = IdeaGenerator(self.llm, session_id=session_id)
         ideas = await idea_gen.run(
             verified_gaps=verified_gaps,
             knowledge_objects=knowledge_objects,
             user_background=user_background,
         )
+        self.monitor.finish_step(session_id, 8)
 
         # Step 9: Experiment Planning + Feedback Loop 3
         logger.info("Step 9: Experiment Planning (%d ideas)", len(ideas))
+        self.monitor.start_step(session_id, 9, "Experiment Planning")
         exp_planner = ExperimentPlanner(self.llm, session_id=session_id)
         experiment_plans: list[dict[str, Any]] = []
 
@@ -399,8 +423,11 @@ class ResearchOrchestrator:
             except Exception:
                 logger.exception("Failed to plan experiment for idea '%s'", idea.get("title", ""))
 
+        self.monitor.finish_step(session_id, 9)
+
         # Step 10: Report Generation
         logger.info("Step 10: Report Generation")
+        self.monitor.start_step(session_id, 10, "Report Generation")
         report_writer = ReportWriter(self.llm, session_id=session_id)
         cost_summary = self.cost_tracker.session_summary(session_id)
 
@@ -441,6 +468,7 @@ class ResearchOrchestrator:
             except Exception:
                 logger.exception("Failed to export session to Zotero")
 
+        self.monitor.finish_step(session_id, 10)
         cost_summary = self.cost_tracker.session_summary(session_id)
         logger.info(
             "Phase 3 complete: %d ideas, %d experiment plans, report=%s, cost $%.4f",
