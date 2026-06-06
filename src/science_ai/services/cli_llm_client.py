@@ -224,8 +224,12 @@ class CLILLMClient:
     # CLI execution
     # ------------------------------------------------------------------
 
-    async def _run_cli(self, cli_tool: str, prompt: str) -> str:
-        """Execute a CLI tool with the given prompt and return stdout."""
+    async def _run_cli(self, cli_tool: str, prompt: str, *, _attempt: int = 0) -> str:
+        """Execute a CLI tool with the given prompt and return stdout.
+
+        Retries up to 2 times (3 total attempts) on timeout before raising.
+        """
+        max_retries = 2
         cmd, use_stdin = self._build_command(cli_tool, prompt)
 
         logger.debug("Running CLI command: %s (prompt_len=%d)", cmd[0], len(prompt))
@@ -267,12 +271,25 @@ class CLILLMClient:
 
         except asyncio.TimeoutError:
             elapsed = time.monotonic() - start
-            logger.error("CLI %s timed out after %.1fs", cli_tool, elapsed)
             try:
                 proc.kill()
             except Exception:
                 pass
-            raise RuntimeError(f"CLI {cli_tool} timed out after {self.timeout}s")
+            if _attempt < max_retries:
+                logger.warning(
+                    "CLI %s timed out after %.1fs (attempt %d/%d), retrying in 5s...",
+                    cli_tool, elapsed, _attempt + 1, max_retries + 1,
+                )
+                await asyncio.sleep(5)
+                return await self._run_cli(cli_tool, prompt, _attempt=_attempt + 1)
+            logger.error(
+                "CLI %s timed out after %.1fs (%d attempts exhausted)",
+                cli_tool, elapsed, max_retries + 1,
+            )
+            raise RuntimeError(
+                f"CLI {cli_tool} timed out after {self.timeout}s "
+                f"({max_retries + 1} attempts)"
+            )
 
     def _build_command(self, cli_tool: str, prompt: str) -> tuple[list[str], bool]:
         """Build the subprocess command for each CLI tool.

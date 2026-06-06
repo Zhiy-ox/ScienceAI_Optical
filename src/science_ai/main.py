@@ -20,7 +20,9 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from science_ai.storage.database import init_db, close_db
     logger.info("ScienceAI starting up")
+    await init_db()
     yield
     logger.info("ScienceAI shutting down")
     # Clean up graph checkpointer (closes Postgres connection if open)
