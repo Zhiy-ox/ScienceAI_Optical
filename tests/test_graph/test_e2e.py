@@ -157,3 +157,47 @@ async def test_get_state_returns_completed_run(monkeypatch):
     assert state["session_id"] == sid
     assert state["question"] == "test question"
     assert len(state["knowledge_objects"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_stream_yields_progress_and_updates(monkeypatch):
+    """stream() yields both custom progress events and node updates."""
+
+    class SimpleReader:
+        def __init__(self, llm, session_id=""):
+            pass
+
+        async def run(self, *, paper_text, paper_id="", title="", priority="high", **kwargs):
+            return {
+                "paper_id": paper_id,
+                "method": {"key_components": ["base"]},
+                "research_problem": {},
+            }
+
+    _install_fake_agents(monkeypatch, SimpleReader)
+
+    from science_ai.orchestrator.graph.runner import GraphRunner
+
+    runner = GraphRunner(search_service=FakeSearch(), llm_backend="cli")
+
+    modes_seen = set()
+    progress_stages = []
+    node_names = []
+
+    async for mode, chunk in runner.stream(
+        "stream test", session_id="e2e-stream", phase=1, max_papers=10,
+    ):
+        modes_seen.add(mode)
+        if mode == "custom":
+            progress_stages.append(chunk.get("stage"))
+        elif mode == "updates":
+            node_names.extend(chunk.keys())
+
+    # Both stream modes are exercised.
+    assert "custom" in modes_seen
+    assert "updates" in modes_seen
+    # Human-readable progress for the early stages was emitted.
+    assert "plan" in progress_stages
+    assert "search" in progress_stages
+    # Node updates flowed through.
+    assert "plan" in node_names

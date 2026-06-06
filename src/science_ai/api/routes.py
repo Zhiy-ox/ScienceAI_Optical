@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi.responses import StreamingResponse
 
 from science_ai.api.schemas import (
     CostDetail,
@@ -65,25 +67,34 @@ async def start_research(
     background_tasks: BackgroundTasks,
 ):
     """Start a new research session. The pipeline runs in the background."""
+    from science_ai.config import settings as cfg
+
     session_id = str(uuid.uuid4())
 
+    # Defer execution to the SSE endpoint when streaming is requested (graph mode).
+    deferred = request.stream and cfg.orchestrator_mode == "graph"
+
     _sessions[session_id] = {
-        "status": "running",
+        "status": "created" if deferred else "running",
         "question": request.question,
         "phase": request.phase,
+        "max_papers": request.max_papers,
+        "user_background": request.user_background,
+        "source": request.source,
         "result": None,
     }
     _cost_trackers[session_id] = CostTracker()
 
-    background_tasks.add_task(
-        _run_pipeline,
-        session_id,
-        request.question,
-        request.max_papers,
-        request.phase,
-        request.user_background,
-        request.source,
-    )
+    if not deferred:
+        background_tasks.add_task(
+            _run_pipeline,
+            session_id,
+            request.question,
+            request.max_papers,
+            request.phase,
+            request.user_background,
+            request.source,
+        )
 
     return SessionCreated(session_id=session_id)
 
@@ -253,6 +264,110 @@ async def get_session_cost(session_id: str):
         call_count=summary["call_count"],
         cache_savings_estimate_usd=round(cache_savings, 4),
         calls=calls,
+    )
+
+
+def _build_session_resources(phase: int, source: str, cfg) -> tuple[Any, Any]:
+    """Build per-session graph store and Zotero client (shared by run + stream)."""
+    graph_store = None
+    if phase >= 3:
+        from science_ai.storage.graph_store import InMemoryGraphStore
+        graph_store = InMemoryGraphStore()
+
+    zotero_client = None
+    if source in ("zotero", "both") and cfg.zotero_library_id and cfg.zotero_api_key:
+        from science_ai.services.zotero_client import ZoteroClient
+        zotero_client = ZoteroClient(
+            library_id=cfg.zotero_library_id,
+            api_key=cfg.zotero_api_key,
+            library_type=cfg.zotero_library_type,
+        )
+    return graph_store, zotero_client
+
+
+def _sse(event: str, data: dict) -> str:
+    """Format a Server-Sent Events frame."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+@router.get("/research/{session_id}/stream")
+async def stream_research(session_id: str):
+    """Stream live pipeline progress via Server-Sent Events (graph mode).
+
+    Drives the graph for sessions created with ``stream=true`` and emits:
+      - ``progress`` events: human-readable stage updates from nodes
+      - ``node`` events: a graph node finished (with its status)
+      - ``done`` / ``error``: terminal events
+    """
+    from science_ai.config import settings as cfg
+
+    session = _sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if cfg.orchestrator_mode != "graph":
+        raise HTTPException(
+            status_code=400, detail="Streaming requires graph orchestrator mode"
+        )
+
+    async def event_gen():
+        # Only deferred sessions (created via stream=true) are executed here.
+        # Anything else (already running in the background, or finished) just
+        # reports its status so the client can fall back to polling — this
+        # prevents double-executing a session.
+        if session["status"] != "created":
+            yield _sse("done", {"status": session["status"], "owned": False})
+            return
+
+        runner = await _get_graph_runner()
+        tracker = _cost_trackers.setdefault(session_id, CostTracker())
+        graph_store, zotero_client = _build_session_resources(
+            session["phase"], session.get("source", "web"), cfg,
+        )
+        session["status"] = "running"
+
+        try:
+            yield _sse("progress", {"stage": "start", "msg": "Pipeline starting…"})
+
+            async for mode, chunk in runner.stream(
+                session["question"],
+                session_id=session_id,
+                phase=session["phase"],
+                max_papers=session.get("max_papers", 15),
+                user_background=session.get("user_background", ""),
+                source=session.get("source", "web"),
+                cost_tracker=tracker,
+                graph_store=graph_store,
+                zotero_client=zotero_client,
+            ):
+                if mode == "custom":
+                    yield _sse("progress", chunk)
+                elif mode == "updates":
+                    for node, upd in chunk.items():
+                        status = upd.get("status") if isinstance(upd, dict) else None
+                        yield _sse("node", {"node": node, "status": status})
+
+            # Finalize: read the aggregated state from the checkpointer.
+            state = await runner.get_state(session_id)
+            if state is not None:
+                state["cost_summary"] = tracker.session_summary(session_id)
+                session["result"] = state
+            session["status"] = "completed"
+            cost = tracker.session_total(session_id)
+            yield _sse("done", {"status": "completed", "cost_so_far": round(cost, 4)})
+        except Exception as e:
+            logger.exception("Stream failed for session %s", session_id)
+            session["status"] = "failed"
+            session["result"] = {"status": "failed"}
+            yield _sse("error", {"message": str(e)})
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -475,20 +590,7 @@ async def _run_pipeline(
     if cfg.orchestrator_mode == "graph":
         try:
             runner = await _get_graph_runner()
-
-            graph_store = None
-            if phase >= 3:
-                from science_ai.storage.graph_store import InMemoryGraphStore
-                graph_store = InMemoryGraphStore()
-
-            zotero_client = None
-            if source in ("zotero", "both") and cfg.zotero_library_id and cfg.zotero_api_key:
-                from science_ai.services.zotero_client import ZoteroClient
-                zotero_client = ZoteroClient(
-                    library_id=cfg.zotero_library_id,
-                    api_key=cfg.zotero_api_key,
-                    library_type=cfg.zotero_library_type,
-                )
+            graph_store, zotero_client = _build_session_resources(phase, source, cfg)
 
             result = await runner.run(
                 question=question,

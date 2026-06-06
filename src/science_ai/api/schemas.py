@@ -13,6 +13,7 @@ class StartResearchRequest(BaseModel):
     phase: int = Field(default=3, ge=1, le=3, description="Pipeline phase to run (1, 2, or 3)")
     user_background: str = Field(default="", description="Optional researcher background for personalization")
     source: str = Field(default="web", description="Paper source: 'web', 'zotero', or 'both'")
+    stream: bool = Field(default=False, description="If true (graph mode), defer execution to the SSE /stream endpoint")
 
 
 # -- Responses --
@@ -115,6 +116,21 @@ class ProviderTestResult(BaseModel):
 
 class SettingsTestResponse(BaseModel):
     results: list[ProviderTestResult]
+
+
+# -- Streaming --
+
+class StreamEvent(BaseModel):
+    """A single SSE event payload (documents the wire format).
+
+    event types: "progress" (human-readable stage update),
+    "node" (a graph node finished), "done" (terminal), "error".
+    """
+    event: str
+    stage: str | None = None
+    msg: str | None = None
+    status: str | None = None
+    data: dict | None = None
 
 
 # -- Sessions --

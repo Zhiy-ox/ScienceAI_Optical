@@ -68,6 +68,18 @@ export interface StartResearchRequest {
   phase?: number;
   user_background?: string;
   source?: "web" | "zotero" | "both";
+  stream?: boolean;
+}
+
+export interface StreamEvent {
+  event: "progress" | "node" | "done" | "error";
+  stage?: string;
+  msg?: string;
+  status?: string;
+  node?: string;
+  count?: number;
+  cost_so_far?: number;
+  message?: string;
 }
 
 export interface SettingsResponse {
@@ -163,4 +175,37 @@ export const api = {
   // Zotero
   listZoteroCollections: () =>
     fetchJSON<ZoteroCollection[]>("/zotero/collections"),
+
+  // Streaming (SSE). Returns an unsubscribe function.
+  streamSession: (
+    sessionId: string,
+    onEvent: (ev: StreamEvent) => void,
+    onError?: (err: Event) => void,
+  ): (() => void) => {
+    const url = `${API_BASE}/research/${sessionId}/stream`;
+    const es = new EventSource(url);
+
+    const handle = (type: StreamEvent["event"]) => (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        onEvent({ event: type, ...data });
+      } catch {
+        /* ignore malformed frame */
+      }
+      if (type === "done" || type === "error") {
+        es.close();
+      }
+    };
+
+    es.addEventListener("progress", handle("progress") as EventListener);
+    es.addEventListener("node", handle("node") as EventListener);
+    es.addEventListener("done", handle("done") as EventListener);
+    es.addEventListener("error", handle("error") as EventListener);
+    es.onerror = (err) => {
+      if (onError) onError(err);
+      es.close();
+    };
+
+    return () => es.close();
+  },
 };

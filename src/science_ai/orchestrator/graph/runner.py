@@ -95,7 +95,77 @@ class GraphRunner:
         session_id = session_id or str(uuid.uuid4())
         tracker = cost_tracker or CostTracker()
 
-        initial_state: dict[str, Any] = {
+        initial_state = self._make_initial_state(
+            question, session_id, phase, max_papers, user_background, source,
+        )
+        config = self._make_config(
+            session_id, tracker,
+            graph_store=graph_store, vector_store=vector_store,
+            embedding_fn=embedding_fn, zotero_client=zotero_client,
+        )
+
+        logger.info("GraphRunner: starting session %s (phase=%d)", session_id, phase)
+
+        final_state = await self._graph.ainvoke(initial_state, config)
+
+        final_state["cost_summary"] = tracker.session_summary(session_id)
+        final_state["session_id"] = session_id
+
+        logger.info(
+            "GraphRunner: session %s complete, status=%s",
+            session_id, final_state.get("status"),
+        )
+        return dict(final_state)
+
+    async def stream(
+        self,
+        question: str,
+        *,
+        session_id: str,
+        phase: int = 3,
+        max_papers: int = 15,
+        user_background: str = "",
+        source: str = "web",
+        cost_tracker: CostTracker | None = None,
+        graph_store: Any = None,
+        vector_store: Any = None,
+        embedding_fn: Any = None,
+        zotero_client: Any = None,
+    ):
+        """Drive the graph and yield ``(stream_mode, chunk)`` tuples live.
+
+        Uses ``stream_mode=["updates", "custom"]`` so callers receive both
+        node-completion updates and human-readable progress emitted by nodes
+        via ``get_stream_writer()``.
+        """
+        tracker = cost_tracker or CostTracker()
+
+        initial_state = self._make_initial_state(
+            question, session_id, phase, max_papers, user_background, source,
+        )
+        config = self._make_config(
+            session_id, tracker,
+            graph_store=graph_store, vector_store=vector_store,
+            embedding_fn=embedding_fn, zotero_client=zotero_client,
+        )
+
+        logger.info("GraphRunner: streaming session %s (phase=%d)", session_id, phase)
+
+        async for mode, chunk in self._graph.astream(
+            initial_state, config, stream_mode=["updates", "custom"],
+        ):
+            yield mode, chunk
+
+    def _make_initial_state(
+        self,
+        question: str,
+        session_id: str,
+        phase: int,
+        max_papers: int,
+        user_background: str,
+        source: str,
+    ) -> dict[str, Any]:
+        return {
             "session_id": session_id,
             "question": question,
             "max_papers": max_papers,
@@ -118,12 +188,22 @@ class GraphRunner:
             "papers_found": 0,
         }
 
-        config = {
+    def _make_config(
+        self,
+        session_id: str,
+        cost_tracker: CostTracker,
+        *,
+        graph_store: Any = None,
+        vector_store: Any = None,
+        embedding_fn: Any = None,
+        zotero_client: Any = None,
+    ) -> dict[str, Any]:
+        return {
             "recursion_limit": 100,
             "configurable": {
                 "thread_id": session_id,
                 "deps": self._build_deps(
-                    cost_tracker=tracker,
+                    cost_tracker=cost_tracker,
                     graph_store=graph_store,
                     vector_store=vector_store,
                     embedding_fn=embedding_fn,
@@ -131,20 +211,6 @@ class GraphRunner:
                 ),
             },
         }
-
-        logger.info("GraphRunner: starting session %s (phase=%d)", session_id, phase)
-
-        final_state = await self._graph.ainvoke(initial_state, config)
-
-        cost_summary = tracker.session_summary(session_id)
-        final_state["cost_summary"] = cost_summary
-        final_state["session_id"] = session_id
-
-        logger.info(
-            "GraphRunner: session %s complete, status=%s",
-            session_id, final_state.get("status"),
-        )
-        return dict(final_state)
 
     async def get_state(self, session_id: str) -> dict[str, Any] | None:
         """Read the current checkpointed state for a session."""

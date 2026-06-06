@@ -225,8 +225,8 @@ Checkpointer factory (`checkpointer.py`) creates `AsyncPostgresSaver` if `checkp
 **Stage 4 — Parallel fan-out** ✅ *Done*
 Deep-read and critique converted to `Send` map-reduce: `deep_read_dispatch` emits one `Send("deep_read_one", ...)` per paper; `critique_dispatch` emits one `Send("critique_one", ...)` per KO. Results fan-in via `operator.add` reducer. Concurrency capped by `Deps.fanout_semaphore` (default 5). Empty-list dispatch fallback uses `Send` to the next node to avoid graph dead-ends. Fan-in edges connect workers to the next pipeline stage.
 
-**Stage 5 — Streaming SSE**
-Add `/research/{id}/stream`; emit `get_stream_writer()` progress from nodes. Dashboard subscribes via `EventSource`; render `<PipelineProgress>`. Keep polling as fallback.
+**Stage 5 — Streaming SSE** ✅ *Done*
+`GET /research/{id}/stream` drives the graph via `astream(stream_mode=["updates","custom"])` and emits SSE frames (`progress` / `node` / `done` / `error`). Nodes call `emit_progress()` (safe no-op outside streaming) to push human-readable stage updates via `get_stream_writer()`. `GraphRunner.stream()` generator + shared state/config builders. Sessions created with `stream=true` are deferred (status `created`) so the SSE endpoint owns execution — guards against double-running background sessions. Dashboard: `api.streamSession()` (EventSource), `<PipelineProgress>` 12-stage rail lighting up live, session page subscribes with polling fallback; New Research sets `stream:true`.
 
 **Stage 6 — Human-in-the-loop**
 Add `interrupt()` gate nodes for `plan` and `gaps`; `interrupt_before` at compile; `/resume` endpoint; dashboard approval cards (approve / edit / reject).

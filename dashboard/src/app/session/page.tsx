@@ -4,7 +4,12 @@ import { useEffect, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import GlassCard, { StatCard, StatusBadge } from "@/components/GlassCard";
-import { api, type ResearchResult } from "@/lib/api";
+import PipelineProgress, { PIPELINE_STAGES } from "@/components/PipelineProgress";
+import { api, type ResearchResult, type StreamEvent } from "@/lib/api";
+
+const STAGE_INDEX: Record<string, number> = Object.fromEntries(
+  PIPELINE_STAGES.map((s, i) => [s.key, i])
+);
 
 function SessionContent() {
   const searchParams = useSearchParams();
@@ -13,6 +18,12 @@ function SessionContent() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState("overview");
+
+  // Live streaming progress
+  const [liveStage, setLiveStage] = useState<string | null>(null);
+  const [liveMsg, setLiveMsg] = useState<string | null>(null);
+  const [completedStages, setCompletedStages] = useState<Set<string>>(new Set());
+  const [streaming, setStreaming] = useState(false);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -42,19 +53,53 @@ function SessionContent() {
         });
     };
 
+    // Try live SSE streaming first; falls back to polling on done/error.
+    const markStage = (stage: string) => {
+      const idx = STAGE_INDEX[stage];
+      if (idx === undefined) return;
+      setLiveStage(stage);
+      setCompletedStages((prev) => {
+        const next = new Set(prev);
+        PIPELINE_STAGES.forEach((s, i) => {
+          if (i < idx) next.add(s.key);
+        });
+        return next;
+      });
+    };
+
+    const onEvent = (ev: StreamEvent) => {
+      if (cancelled) return;
+      if (ev.event === "progress" && ev.stage) {
+        setStreaming(true);
+        if (ev.stage !== "start") markStage(ev.stage);
+        if (ev.msg) setLiveMsg(ev.msg);
+      } else if (ev.event === "done" || ev.event === "error") {
+        setStreaming(false);
+        setLiveStage(null);
+        fetchResults();
+      }
+    };
+
+    const unsubscribe = api.streamSession(sessionId, onEvent, () => {
+      // SSE not available — fall back to polling.
+      if (!cancelled) fetchResults();
+    });
+
     fetchResults();
 
-    // Auto-refresh polling when status is running
+    // Auto-refresh polling fallback when not streaming.
     const interval = setInterval(() => {
       if (result?.status === "completed" || result?.status === "failed") return;
-      fetchResults();
+      if (!streaming) fetchResults();
     }, 5000);
 
     return () => {
       cancelled = true;
       clearInterval(interval);
+      unsubscribe();
     };
-  }, [sessionId, result?.status]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
 
   if (!sessionId) {
     return (
@@ -71,13 +116,24 @@ function SessionContent() {
     return (
       <div className="space-y-6">
         <div className="shimmer h-8 w-64" />
+        {(streaming || liveStage) && (
+          <PipelineProgress
+            activeStage={liveStage}
+            completedStages={completedStages}
+            message={liveMsg}
+          />
+        )}
         <div className="grid grid-cols-4 gap-4">
           {[1, 2, 3, 4].map((i) => <div key={i} className="shimmer h-24" />)}
         </div>
         <div className="shimmer h-64" />
         {!error && (
           <div className="text-center">
-            <p className="text-white/40 text-sm">Pipeline is running... auto-refreshing every 5s</p>
+            <p className="text-white/40 text-sm">
+              {streaming
+                ? "Pipeline is running — live progress above"
+                : "Pipeline is running... auto-refreshing every 5s"}
+            </p>
           </div>
         )}
       </div>
@@ -127,6 +183,15 @@ function SessionContent() {
         </div>
         <StatusBadge status={result.status} />
       </div>
+
+      {/* Live pipeline progress (visible while streaming) */}
+      {streaming && (
+        <PipelineProgress
+          activeStage={liveStage}
+          completedStages={completedStages}
+          message={liveMsg}
+        />
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4">

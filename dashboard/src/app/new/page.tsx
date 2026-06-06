@@ -49,6 +49,7 @@ export default function NewResearchPage() {
         phase,
         user_background: background.trim(),
         source,
+        stream: true,
       });
       router.push(`/session?id=${res.session_id}`);
     } catch (err) {

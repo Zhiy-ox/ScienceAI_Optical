@@ -25,6 +25,26 @@ from science_ai.orchestrator.graph.state import ResearchState
 logger = logging.getLogger(__name__)
 
 
+def emit_progress(stage: str, msg: str, **extra: Any) -> None:
+    """Emit a human-readable progress event to the SSE stream, if streaming.
+
+    Safe no-op when called outside a streaming context (e.g. ainvoke, tests).
+    """
+    try:
+        from langgraph.config import get_stream_writer
+        writer = get_stream_writer()
+    except Exception:
+        return
+    if writer is None:
+        return
+    payload = {"stage": stage, "msg": msg}
+    payload.update(extra)
+    try:
+        writer(payload)
+    except Exception:
+        pass
+
+
 # ------------------------------------------------------------------
 # Stage 1: Plan
 # ------------------------------------------------------------------
@@ -32,12 +52,15 @@ logger = logging.getLogger(__name__)
 async def plan_node(state: ResearchState, config: RunnableConfig) -> dict[str, Any]:
     deps = get_deps(config)
     sid = state["session_id"]
+    emit_progress("plan", "Generating research plan…")
 
     from science_ai.agents.query_planner import QueryPlanner
 
     planner = QueryPlanner(deps.llm, session_id=sid)
     plan = await planner.run(question=state["question"])
 
+    n_queries = len(plan.get("search_queries", []))
+    emit_progress("plan", f"Plan ready — {n_queries} search queries")
     logger.info("[graph] plan_node complete for %s", sid)
     return {"plan": plan, "status": "planned"}
 
@@ -57,6 +80,7 @@ async def search_node(state: ResearchState, config: RunnableConfig) -> dict[str,
     plan = state.get("plan", {})
     source = state.get("source", "web")
     question = state["question"]
+    emit_progress("search", "Searching for papers…")
 
     existing = state.get("all_papers", [])
     seen_ids: set[str] = {p["paper_id"] for p in existing}
@@ -117,6 +141,7 @@ async def search_node(state: ResearchState, config: RunnableConfig) -> dict[str,
     ]
     total = len(existing) + len(paper_dicts)
 
+    emit_progress("search", f"Found {total} papers ({len(paper_dicts)} new)", count=total)
     logger.info(
         "[graph] search_node: +%d new papers (%d total)%s",
         len(paper_dicts), total, " [refinement]" if refine_keywords else "",
@@ -149,6 +174,8 @@ async def triage_node(state: ResearchState, config: RunnableConfig) -> dict[str,
         logger.info("[graph] triage_node: nothing new to triage")
         return {"status": "triaged"}
 
+    emit_progress("triage", f"Triaging {len(to_triage)} papers…")
+
     from science_ai.agents.paper_triage import PaperTriage
 
     triage_agent = PaperTriage(deps.llm, session_id=sid)
@@ -156,6 +183,8 @@ async def triage_node(state: ResearchState, config: RunnableConfig) -> dict[str,
         question=state["question"], papers=to_triage,
     )
 
+    must_read = sum(1 for r in triage_results if r.get("priority") == "must_read")
+    emit_progress("triage", f"Triaged — {must_read} must-read", count=len(triage_results))
     logger.info("[graph] triage_node: %d new results", len(triage_results))
     return {"triage_results": triage_results, "status": "triaged"}
 
@@ -192,6 +221,7 @@ async def select_papers_node(state: ResearchState, config: RunnableConfig) -> di
     if leftover > 0:
         papers_to_read.extend(worth_reading[:leftover])
 
+    emit_progress("select", f"Selected {len(papers_to_read)} papers to deep-read")
     logger.info("[graph] select_papers_node: %d selected", len(papers_to_read))
     return {"papers_to_read": papers_to_read, "status": "selected"}
 
@@ -249,6 +279,7 @@ async def deep_read_one(state: dict[str, Any], config: RunnableConfig) -> dict[s
 
     async with deps.fanout_semaphore:
         reader = DeepReader(deps.llm, session_id=sid)
+        emit_progress("deep_read", f"Reading: {state.get('title', pid)[:60]}")
         try:
             ko = await reader.run(
                 paper_text=state.get("abstract", ""),
@@ -305,6 +336,7 @@ async def critique_one(state: dict[str, Any], config: RunnableConfig) -> dict[st
     from science_ai.agents.critique import CritiqueAgent
 
     async with deps.fanout_semaphore:
+        emit_progress("critique", f"Critiquing paper {ko.get('paper_id', '')}")
         critique_agent = CritiqueAgent(deps.llm, session_id=sid)
         try:
             critique = await critique_agent.run(knowledge_obj=ko)
@@ -337,6 +369,7 @@ async def index_node(state: ResearchState, config: RunnableConfig) -> dict[str, 
             except Exception:
                 logger.exception("Failed to ingest paper %s into graph", ko.get("paper_id"))
 
+    emit_progress("index", f"Indexed {len(knowledge_objects)} knowledge objects")
     logger.info("[graph] index_node complete")
     return {"status": "indexed"}
 
@@ -350,6 +383,8 @@ async def gap_detect_node(state: ResearchState, config: RunnableConfig) -> dict[
     sid = state["session_id"]
     knowledge_objects = state.get("knowledge_objects", [])
     critiques = state.get("critiques", [])
+
+    emit_progress("gap_detect", "Detecting research gaps…")
 
     from science_ai.agents.gap_detector import GapDetector
 
@@ -369,6 +404,7 @@ async def gap_detect_node(state: ResearchState, config: RunnableConfig) -> dict[
 
     gaps = await gap_detector.run(**run_kwargs)
 
+    emit_progress("gap_detect", f"Found {len(gaps)} candidate gaps", count=len(gaps))
     logger.info("[graph] gap_detect_node: %d gaps", len(gaps))
     return {"gaps": gaps, "status": "gaps_detected"}
 
@@ -382,6 +418,8 @@ async def verify_node(state: ResearchState, config: RunnableConfig) -> dict[str,
     sid = state["session_id"]
     gaps = state.get("gaps", [])
 
+    emit_progress("verify", f"Verifying novelty of {len(gaps)} gaps…")
+
     from science_ai.agents.verification import VerificationAgent
 
     verifier = VerificationAgent(
@@ -393,6 +431,10 @@ async def verify_node(state: ResearchState, config: RunnableConfig) -> dict[str,
         v for v in verification_results if v.get("status") == "verified_gap"
     ]
 
+    emit_progress(
+        "verify", f"{len(verified_gaps)} gaps verified as novel",
+        count=len(verified_gaps),
+    )
     logger.info(
         "[graph] verify_node: %d/%d verified",
         len(verified_gaps), len(verification_results),
@@ -417,6 +459,8 @@ async def idea_node(state: ResearchState, config: RunnableConfig) -> dict[str, A
     if not verified_gaps:
         return {"ideas": [], "status": "no_gaps"}
 
+    emit_progress("idea", f"Generating ideas from {len(verified_gaps)} gaps…")
+
     from science_ai.agents.idea_generator import IdeaGenerator
 
     # On a regeneration pass (Feedback Loop 3), append the feasibility constraint.
@@ -432,6 +476,7 @@ async def idea_node(state: ResearchState, config: RunnableConfig) -> dict[str, A
         user_background=user_background,
     )
 
+    emit_progress("idea", f"Generated {len(ideas)} research ideas", count=len(ideas))
     logger.info("[graph] idea_node: %d ideas", len(ideas))
     return {"ideas": ideas, "status": "ideas_generated"}
 
@@ -445,6 +490,8 @@ async def experiment_node(state: ResearchState, config: RunnableConfig) -> dict[
     sid = state["session_id"]
     ideas = state.get("ideas", [])
     knowledge_objects = state.get("knowledge_objects", [])
+
+    emit_progress("experiment", f"Planning experiments for {len(ideas)} ideas…")
 
     from science_ai.agents.experiment_planner import ExperimentPlanner
 
@@ -460,6 +507,7 @@ async def experiment_node(state: ResearchState, config: RunnableConfig) -> dict[
         except Exception:
             logger.exception("Failed to plan experiment for idea '%s'", idea.get("title", ""))
 
+    emit_progress("experiment", f"Planned {len(experiment_plans)} experiments")
     logger.info("[graph] experiment_node: %d plans", len(experiment_plans))
     return {"experiment_plans": experiment_plans, "status": "experiments_planned"}
 
@@ -471,6 +519,8 @@ async def experiment_node(state: ResearchState, config: RunnableConfig) -> dict[
 async def report_node(state: ResearchState, config: RunnableConfig) -> dict[str, Any]:
     deps = get_deps(config)
     sid = state["session_id"]
+
+    emit_progress("report", "Writing final report…")
 
     from science_ai.agents.report_writer import ReportWriter
 
@@ -492,6 +542,7 @@ async def report_node(state: ResearchState, config: RunnableConfig) -> dict[str,
         logger.exception("Failed to generate report")
         report = None
 
+    emit_progress("report", "Report complete")
     logger.info("[graph] report_node complete")
     return {"report": report, "status": "report_written"}
 
