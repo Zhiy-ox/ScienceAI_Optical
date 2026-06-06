@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     # Orchestrator mode: "legacy" (sequential) or "graph" (LangGraph)
     orchestrator_mode: str = "legacy"
 
+    # Graph checkpointer DSN (psycopg v3 format).
+    # Empty string = use in-memory MemorySaver (no durability).
+    # Set to e.g. "postgresql://scienceai:scienceai@localhost:5432/scienceai"
+    # to enable durable resume across server restarts.
+    checkpointer_dsn: str = ""
+
     # Cost budget (USD) — pipeline stops if exceeded
     cost_budget_usd: float = Field(default=10.0)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
@@ -29,9 +30,28 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# In-memory session store (will move to Redis/DB later)
+# In-memory session store — lightweight registry.
+# For graph mode: only tracks question/phase/running status for active sessions;
+# completed session data is read from the checkpointer.
 _sessions: dict[str, dict] = {}
 _cost_trackers: dict[str, CostTracker] = {}
+
+# Shared GraphRunner singleton (lazy-initialized, long-lived).
+_graph_runner: Any = None
+
+
+async def _get_graph_runner():
+    """Return or create the shared GraphRunner with its checkpointer."""
+    global _graph_runner
+    if _graph_runner is not None:
+        return _graph_runner
+
+    from science_ai.orchestrator.graph.checkpointer import get_checkpointer
+    from science_ai.orchestrator.graph.runner import GraphRunner
+
+    checkpointer = await get_checkpointer()
+    _graph_runner = GraphRunner(checkpointer=checkpointer)
+    return _graph_runner
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -71,6 +91,12 @@ async def start_research(
 @router.get("/research/{session_id}/status", response_model=SessionStatus)
 async def get_session_status(session_id: str):
     """Check the status of a research session."""
+    from science_ai.config import settings as cfg
+
+    # Graph mode: prefer checkpointer (survives restart), fall back to _sessions.
+    if cfg.orchestrator_mode == "graph":
+        return await _graph_session_status(session_id)
+
     session = _sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -85,9 +111,44 @@ async def get_session_status(session_id: str):
     )
 
 
+async def _graph_session_status(session_id: str) -> SessionStatus:
+    """Derive session status from checkpointer state."""
+    # If the session is still tracked in _sessions as "running", trust that.
+    in_memory = _sessions.get(session_id)
+    if in_memory and in_memory["status"] == "running":
+        tracker = _cost_trackers.get(session_id)
+        cost = tracker.session_total(session_id) if tracker else 0.0
+        return SessionStatus(
+            session_id=session_id, status="running", cost_so_far=round(cost, 4),
+        )
+
+    # Read from checkpointer (works even after server restart).
+    runner = await _get_graph_runner()
+    state = await runner.get_state(session_id)
+    if not state:
+        if in_memory:
+            return SessionStatus(
+                session_id=session_id, status=in_memory.get("status", "unknown"),
+            )
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    cost = state.get("cost_summary", {}).get("total_usd", 0.0)
+    status = state.get("status", "unknown")
+
+    return SessionStatus(
+        session_id=session_id, status=status, cost_so_far=round(cost, 4),
+    )
+
+
 @router.get("/research/{session_id}/results", response_model=ResearchResult)
 async def get_session_results(session_id: str):
     """Get the results of a completed research session."""
+    from science_ai.config import settings as cfg
+
+    # Graph mode: read from checkpointer.
+    if cfg.orchestrator_mode == "graph":
+        return await _graph_session_results(session_id)
+
     session = _sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -99,6 +160,26 @@ async def get_session_results(session_id: str):
     if not result:
         raise HTTPException(status_code=500, detail="Pipeline failed with no result")
 
+    return _result_from_dict(session_id, result)
+
+
+async def _graph_session_results(session_id: str) -> ResearchResult:
+    """Read results from the checkpointer (graph mode)."""
+    in_memory = _sessions.get(session_id)
+    if in_memory and in_memory["status"] == "running":
+        raise HTTPException(status_code=202, detail="Pipeline still running")
+
+    runner = await _get_graph_runner()
+    state = await runner.get_state(session_id)
+    if not state:
+        if in_memory and in_memory.get("result"):
+            return _result_from_dict(session_id, in_memory["result"])
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return _result_from_dict(session_id, state)
+
+
+def _result_from_dict(session_id: str, result: dict) -> ResearchResult:
     return ResearchResult(
         session_id=session_id,
         status=result.get("status", "unknown"),
@@ -341,11 +422,10 @@ async def test_settings():
 
 @router.get("/sessions", response_model=list[SessionListItem])
 async def list_sessions():
-    """List all research sessions."""
-    tracker_map = _cost_trackers
+    """List all research sessions (in-memory registry)."""
     items = []
     for sid, sess in _sessions.items():
-        tracker = tracker_map.get(sid)
+        tracker = _cost_trackers.get(sid)
         cost = tracker.session_total(sid) if tracker else 0.0
         items.append(SessionListItem(
             session_id=sid,
@@ -394,7 +474,7 @@ async def _run_pipeline(
     # ---- Graph-based orchestrator (LangGraph) ----
     if cfg.orchestrator_mode == "graph":
         try:
-            from science_ai.orchestrator.graph.runner import GraphRunner
+            runner = await _get_graph_runner()
 
             graph_store = None
             if phase >= 3:
@@ -410,11 +490,6 @@ async def _run_pipeline(
                     library_type=cfg.zotero_library_type,
                 )
 
-            runner = GraphRunner(
-                cost_tracker=tracker,
-                graph_store=graph_store,
-                zotero_client=zotero_client,
-            )
             result = await runner.run(
                 question=question,
                 session_id=session_id,
@@ -422,6 +497,9 @@ async def _run_pipeline(
                 max_papers=max_papers,
                 user_background=user_background,
                 source=source,
+                cost_tracker=tracker,
+                graph_store=graph_store,
+                zotero_client=zotero_client,
             )
             _sessions[session_id]["result"] = result
             _sessions[session_id]["status"] = "completed"

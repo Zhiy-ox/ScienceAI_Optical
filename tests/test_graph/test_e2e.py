@@ -127,3 +127,33 @@ async def test_phase1_no_refinement_when_no_new_keywords(monkeypatch):
 
     assert result["search_refine_count"] == 0
     assert len(result["knowledge_objects"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_state_returns_completed_run(monkeypatch):
+    """After a run, get_state returns the checkpointed final state."""
+
+    class SimpleReader:
+        def __init__(self, llm, session_id=""):
+            pass
+
+        async def run(self, *, paper_text, paper_id="", title="", priority="high", **kwargs):
+            return {
+                "paper_id": paper_id,
+                "method": {"key_components": ["base"]},
+                "research_problem": {},
+            }
+
+    _install_fake_agents(monkeypatch, SimpleReader)
+
+    from science_ai.orchestrator.graph.runner import GraphRunner
+
+    runner = GraphRunner(search_service=FakeSearch(), llm_backend="cli")
+    sid = "e2e-getstate"
+    await runner.run("test question", session_id=sid, phase=1, max_papers=10)
+
+    state = await runner.get_state(sid)
+    assert state is not None
+    assert state["session_id"] == sid
+    assert state["question"] == "test question"
+    assert len(state["knowledge_objects"]) > 0

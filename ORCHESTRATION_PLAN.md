@@ -219,8 +219,8 @@ State + Deps + nodes for the happy path (plan→search→triage→select→deep_
 **Stage 2 — Feedback loops as conditional edges** ✅ *Done*
 Ported the 3 loops to `add_conditional_edges` using `FeedbackController` thresholds + state counters. Each loop is a `*_decision` node (mutates transient state, increments a checkpointed counter) feeding a pure router (`after_refine_decision` / `after_gap_retry_decision` / `after_idea_regen_decision`). Processing nodes (search/triage/select/deep_read) made re-entrant so loop passes only handle new items (reducers never double-count). Bounded by `MAX_LOOP_ITERATIONS=3`; runner sets `recursion_limit=100`. Unit-tested each router + decision node (trigger + max-iteration bounds) plus an e2e refinement-loop run through `ainvoke`.
 
-**Stage 3 — Postgres checkpointing (durable resume)**
-Swap `MemorySaver` → `AsyncPostgresSaver`. Retire `_sessions`; status/results read from `aget_state`. Test: kill & restart server mid-run, confirm resume from last node.
+**Stage 3 — Postgres checkpointing (durable resume)** ✅ *Done*
+Checkpointer factory (`checkpointer.py`) creates `AsyncPostgresSaver` if `checkpointer_dsn` is configured and Postgres is reachable, otherwise falls back to `MemorySaver` (in-memory). `GraphRunner` refactored as a shared singleton: LLM client + search + checkpointer are shared across sessions; per-session resources (cost tracker, graph store, zotero client) passed to `run()`. Status/results endpoints read from the checkpointer in graph mode (survives restart); `_sessions` kept as a lightweight in-memory registry for active runs. App lifespan hook closes the Postgres connection on shutdown.
 
 **Stage 4 — Parallel fan-out**
 Convert deep-read & critique to `Send` map-reduce with a shared semaphore. Benchmark wall-clock vs. serial on a 15-paper run.

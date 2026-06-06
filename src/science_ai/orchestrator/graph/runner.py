@@ -1,4 +1,9 @@
-"""High-level runner that wires up Deps and invokes the compiled graph."""
+"""High-level runner that wires up Deps and invokes the compiled graph.
+
+The runner is designed to be a long-lived singleton: the LLM client, search
+service, and checkpointer are shared across sessions; per-session resources
+(cost tracker, graph store, zotero client) are passed to ``run()``.
+"""
 
 from __future__ import annotations
 
@@ -12,34 +17,31 @@ from science_ai.cost.tracker import CostTracker
 from science_ai.orchestrator.feedback import FeedbackController
 from science_ai.orchestrator.graph.builder import build_graph
 from science_ai.orchestrator.graph.deps import Deps
-from science_ai.orchestrator.graph.state import ResearchState
 from science_ai.services.paper_search import PaperSearchService
 
 logger = logging.getLogger(__name__)
 
 
 class GraphRunner:
-    """Manages graph compilation, dependency wiring, and invocation."""
+    """Manages graph compilation, dependency wiring, and invocation.
+
+    Shared across sessions — create once at app startup, use for every run.
+    """
 
     def __init__(
         self,
-        cost_tracker: CostTracker | None = None,
+        *,
+        checkpointer: Any = None,
         search_service: PaperSearchService | None = None,
-        vector_store: Any | None = None,
-        graph_store: Any | None = None,
-        embedding_fn: Any | None = None,
-        zotero_client: Any | None = None,
         llm_backend: str | None = None,
     ) -> None:
         from science_ai.config import settings
-
-        self.cost_tracker = cost_tracker or CostTracker()
 
         backend = llm_backend or settings.llm_backend
         if backend == "cli":
             from science_ai.services.cli_llm_client import CLILLMClient
             self.llm = CLILLMClient(
-                cost_tracker=self.cost_tracker,
+                cost_tracker=CostTracker(),
                 codex_cmd=settings.cli_codex_command,
                 gemini_cmd=settings.cli_gemini_command,
                 claude_cmd=settings.cli_claude_command,
@@ -48,29 +50,30 @@ class GraphRunner:
             logger.info("GraphRunner: CLI backend")
         else:
             from science_ai.services.llm_client import LLMClient
-            self.llm = LLMClient(cost_tracker=self.cost_tracker)
+            self.llm = LLMClient(cost_tracker=CostTracker())
             logger.info("GraphRunner: API backend")
 
         self.search = search_service or PaperSearchService()
-        self.feedback = FeedbackController()
-        self.vector_store = vector_store
-        self.graph_store = graph_store
-        self.embedding_fn = embedding_fn
-        self.zotero_client = zotero_client
-
-        self._checkpointer = MemorySaver()
+        self._checkpointer = checkpointer or MemorySaver()
         self._graph = build_graph(checkpointer=self._checkpointer)
 
-    def _build_deps(self) -> Deps:
+    def _build_deps(
+        self,
+        cost_tracker: CostTracker,
+        graph_store: Any = None,
+        embedding_fn: Any = None,
+        vector_store: Any = None,
+        zotero_client: Any = None,
+    ) -> Deps:
         return Deps(
             llm=self.llm,
             search=self.search,
-            cost_tracker=self.cost_tracker,
-            feedback=self.feedback,
-            vector_store=self.vector_store,
-            graph_store=self.graph_store,
-            embedding_fn=self.embedding_fn,
-            zotero_client=self.zotero_client,
+            cost_tracker=cost_tracker,
+            feedback=FeedbackController(),
+            vector_store=vector_store,
+            graph_store=graph_store,
+            embedding_fn=embedding_fn,
+            zotero_client=zotero_client,
         )
 
     async def run(
@@ -82,9 +85,15 @@ class GraphRunner:
         max_papers: int = 15,
         user_background: str = "",
         source: str = "web",
+        cost_tracker: CostTracker | None = None,
+        graph_store: Any = None,
+        vector_store: Any = None,
+        embedding_fn: Any = None,
+        zotero_client: Any = None,
     ) -> dict[str, Any]:
         """Kick off the graph and return the final state as a result dict."""
         session_id = session_id or str(uuid.uuid4())
+        tracker = cost_tracker or CostTracker()
 
         initial_state: dict[str, Any] = {
             "session_id": session_id,
@@ -110,11 +119,16 @@ class GraphRunner:
         }
 
         config = {
-            # Loops can push past LangGraph's default 25-step recursion limit.
             "recursion_limit": 100,
             "configurable": {
                 "thread_id": session_id,
-                "deps": self._build_deps(),
+                "deps": self._build_deps(
+                    cost_tracker=tracker,
+                    graph_store=graph_store,
+                    vector_store=vector_store,
+                    embedding_fn=embedding_fn,
+                    zotero_client=zotero_client,
+                ),
             },
         }
 
@@ -122,7 +136,7 @@ class GraphRunner:
 
         final_state = await self._graph.ainvoke(initial_state, config)
 
-        cost_summary = self.cost_tracker.session_summary(session_id)
+        cost_summary = tracker.session_summary(session_id)
         final_state["cost_summary"] = cost_summary
         final_state["session_id"] = session_id
 
@@ -139,3 +153,8 @@ class GraphRunner:
         if snapshot and snapshot.values:
             return dict(snapshot.values)
         return None
+
+    async def get_snapshot(self, session_id: str):
+        """Return the raw StateSnapshot (values + next pending nodes)."""
+        config = {"configurable": {"thread_id": session_id}}
+        return await self._graph.aget_state(config)
