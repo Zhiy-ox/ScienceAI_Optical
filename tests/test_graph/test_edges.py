@@ -2,7 +2,9 @@
 
 from science_ai.orchestrator.graph.edges import (
     after_gap_retry_decision,
+    after_gaps_gate,
     after_idea_regen_decision,
+    after_plan_gate,
     after_refine_decision,
 )
 
@@ -60,3 +62,26 @@ def test_idea_regen_continues_to_report():
 
 def test_idea_regen_default_continues():
     assert after_idea_regen_decision({}) == "continue_to_report"
+
+
+# --- HITL gates --------------------------------------------------------------
+
+def test_plan_gate_rejected_ends():
+    assert after_plan_gate({"status": "rejected"}) == "rejected"
+
+
+def test_plan_gate_approved_continues():
+    assert after_plan_gate({"status": "plan_approved"}) == "approved"
+
+
+def test_plan_gate_passthrough_continues():
+    # passthrough leaves status as "planned"
+    assert after_plan_gate({"status": "planned"}) == "approved"
+
+
+def test_gaps_gate_rejected_ends():
+    assert after_gaps_gate({"status": "rejected"}) == "rejected"
+
+
+def test_gaps_gate_approved_continues():
+    assert after_gaps_gate({"status": "gaps_approved"}) == "approved"

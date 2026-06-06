@@ -48,3 +48,17 @@ def after_idea_regen_decision(state: ResearchState) -> str:
     if state.get("idea_regen_pending"):
         return "regen"
     return "continue_to_report"
+
+
+def after_plan_gate(state: ResearchState) -> str:
+    """HITL gate: a rejected plan ends the run, otherwise continue to search."""
+    if state.get("status") == "rejected":
+        return "rejected"
+    return "approved"
+
+
+def after_gaps_gate(state: ResearchState) -> str:
+    """HITL gate: rejected gaps end the run, otherwise continue to ideation."""
+    if state.get("status") == "rejected":
+        return "rejected"
+    return "approved"

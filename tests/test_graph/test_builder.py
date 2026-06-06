@@ -13,10 +13,10 @@ def test_graph_has_expected_nodes():
     node_names = set(graph.get_graph().nodes.keys())
     expected = {
         "__start__", "__end__",
-        "plan", "search", "triage", "select_papers",
+        "plan", "plan_gate", "search", "triage", "select_papers",
         "deep_read_one", "refine_decision",
         "critique_one", "index",
-        "gap_detect", "verify", "gap_retry_decision",
+        "gap_detect", "verify", "gap_retry_decision", "gaps_gate",
         "idea", "experiment", "idea_regen_decision",
         "report", "zotero_export",
     }

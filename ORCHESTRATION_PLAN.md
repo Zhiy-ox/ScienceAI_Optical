@@ -228,8 +228,8 @@ Deep-read and critique converted to `Send` map-reduce: `deep_read_dispatch` emit
 **Stage 5 — Streaming SSE** ✅ *Done*
 `GET /research/{id}/stream` drives the graph via `astream(stream_mode=["updates","custom"])` and emits SSE frames (`progress` / `node` / `done` / `error`). Nodes call `emit_progress()` (safe no-op outside streaming) to push human-readable stage updates via `get_stream_writer()`. `GraphRunner.stream()` generator + shared state/config builders. Sessions created with `stream=true` are deferred (status `created`) so the SSE endpoint owns execution — guards against double-running background sessions. Dashboard: `api.streamSession()` (EventSource), `<PipelineProgress>` 12-stage rail lighting up live, session page subscribes with polling fallback; New Research sets `stream:true`.
 
-**Stage 6 — Human-in-the-loop**
-Add `interrupt()` gate nodes for `plan` and `gaps`; `interrupt_before` at compile; `/resume` endpoint; dashboard approval cards (approve / edit / reject).
+**Stage 6 — Human-in-the-loop** ✅ *Done*
+`plan_gate` and `gaps_gate` nodes call `interrupt()` when their gate is in `state["hitl_gates"]` (passthrough otherwise). Gates route via `after_plan_gate`/`after_gaps_gate` (rejected → END, approved → continue). `GraphRunner.resume()` drives `astream(Command(resume=decision))`; `get_pending_interrupt()` reads paused state from the checkpointer. `POST /research/{id}/resume` streams the continuation as SSE (shared `_consume_graph_stream` helper detects `__interrupt__`, emits `interrupt` events, sets status `awaiting_input`). Sessions opt in via `hitl_gates` on `/start` (`[]` = autonomous, preserving prior behavior). Dashboard: `<ApprovalCard>` (approve/reject), `api.resumeSession()` (fetch-based POST SSE reader), session page shows the gate card and resumes; New Research has "Pause at Plan"/"Pause at Gaps" toggles.
 
 **Stage 7 — Parity validation & cutover**
 Side-by-side legacy vs. graph on a fixed question set; compare papers/gaps/ideas/cost. Flip default `ORCHESTRATOR_MODE=graph`; mark legacy deprecated; remove after a soak period.

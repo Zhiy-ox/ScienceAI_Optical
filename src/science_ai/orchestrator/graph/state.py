@@ -14,6 +14,7 @@ class ResearchState(TypedDict, total=False):
     phase: int  # 1 | 2 | 3
     user_background: str
     source: str  # web | zotero | both
+    hitl_gates: list[str]  # opt-in approval gates, e.g. ["plan", "gaps"]; [] = autonomous
 
     # --- stage outputs ---
     plan: dict[str, Any]

@@ -66,6 +66,64 @@ async def plan_node(state: ResearchState, config: RunnableConfig) -> dict[str, A
 
 
 # ------------------------------------------------------------------
+# Human-in-the-loop gates (Stage 6)
+#
+# A gate node pauses the graph via interrupt() when its gate is enabled in
+# state["hitl_gates"]. The interrupt payload is surfaced to the client (via
+# SSE / status); the client resumes with Command(resume={"action": ...}).
+# Decision shape: {"action": "approve"|"edit"|"reject", "plan"/"verified_gaps": <edited>}
+# When the gate is disabled, the node is a transparent passthrough.
+# ------------------------------------------------------------------
+
+async def plan_gate_node(state: ResearchState, config: RunnableConfig) -> dict[str, Any]:
+    """Optional approval gate after planning, before searching."""
+    if "plan" not in state.get("hitl_gates", []):
+        return {}  # passthrough
+
+    from langgraph.types import interrupt
+
+    decision = interrupt({
+        "type": "approve_plan",
+        "message": "Review the research plan before searching.",
+        "plan": state.get("plan"),
+    }) or {}
+
+    action = decision.get("action", "approve")
+    if action == "reject":
+        emit_progress("plan_gate", "Plan rejected — stopping")
+        return {"status": "rejected"}
+    if action == "edit" and decision.get("plan"):
+        emit_progress("plan_gate", "Plan edited and approved")
+        return {"plan": decision["plan"], "status": "plan_approved"}
+    emit_progress("plan_gate", "Plan approved")
+    return {"status": "plan_approved"}
+
+
+async def gaps_gate_node(state: ResearchState, config: RunnableConfig) -> dict[str, Any]:
+    """Optional approval gate after verification, before idea generation."""
+    if "gaps" not in state.get("hitl_gates", []):
+        return {}  # passthrough
+
+    from langgraph.types import interrupt
+
+    decision = interrupt({
+        "type": "approve_gaps",
+        "message": "Review verified gaps before generating ideas.",
+        "verified_gaps": state.get("verified_gaps", []),
+    }) or {}
+
+    action = decision.get("action", "approve")
+    if action == "reject":
+        emit_progress("gaps_gate", "Gaps rejected — stopping")
+        return {"status": "rejected", "verified_gaps": []}
+    if action == "edit" and decision.get("verified_gaps") is not None:
+        emit_progress("gaps_gate", "Gaps edited and approved")
+        return {"verified_gaps": decision["verified_gaps"], "status": "gaps_approved"}
+    emit_progress("gaps_gate", "Gaps approved")
+    return {"status": "gaps_approved"}
+
+
+# ------------------------------------------------------------------
 # Stage 2: Search
 # ------------------------------------------------------------------
 

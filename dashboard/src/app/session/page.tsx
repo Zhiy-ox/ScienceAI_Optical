@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import GlassCard, { StatCard, StatusBadge } from "@/components/GlassCard";
 import PipelineProgress, { PIPELINE_STAGES } from "@/components/PipelineProgress";
+import ApprovalCard, { type InterruptPayload } from "@/components/ApprovalCard";
 import { api, type ResearchResult, type StreamEvent } from "@/lib/api";
 
 const STAGE_INDEX: Record<string, number> = Object.fromEntries(
@@ -24,6 +25,10 @@ function SessionContent() {
   const [liveMsg, setLiveMsg] = useState<string | null>(null);
   const [completedStages, setCompletedStages] = useState<Set<string>>(new Set());
   const [streaming, setStreaming] = useState(false);
+
+  // Human-in-the-loop gate
+  const [interrupt, setInterrupt] = useState<InterruptPayload | null>(null);
+  const [resuming, setResuming] = useState(false);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -71,8 +76,18 @@ function SessionContent() {
       if (cancelled) return;
       if (ev.event === "progress" && ev.stage) {
         setStreaming(true);
-        if (ev.stage !== "start") markStage(ev.stage);
+        if (ev.stage !== "start" && ev.stage !== "resume") markStage(ev.stage);
         if (ev.msg) setLiveMsg(ev.msg);
+      } else if (ev.event === "interrupt") {
+        // Pipeline paused at a HITL gate — show the approval card.
+        setStreaming(false);
+        setLiveMsg(null);
+        setInterrupt({
+          type: ev.type,
+          message: ev.msg,
+          plan: ev.plan,
+          verified_gaps: ev.verified_gaps,
+        });
       } else if (ev.event === "done" || ev.event === "error") {
         setStreaming(false);
         setLiveStage(null);
@@ -100,6 +115,75 @@ function SessionContent() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
+
+  const handleDecision = async (action: "approve" | "reject") => {
+    setResuming(true);
+    let gotNewInterrupt = false;
+
+    const advance = (stage: string) => {
+      const idx = STAGE_INDEX[stage];
+      if (idx === undefined) return;
+      setLiveStage(stage);
+      setCompletedStages((prev) => {
+        const next = new Set(prev);
+        PIPELINE_STAGES.forEach((s, i) => {
+          if (i < idx) next.add(s.key);
+        });
+        return next;
+      });
+    };
+
+    try {
+      await api.resumeSession(sessionId, { action }, (ev) => {
+        if (ev.event === "progress" && ev.stage) {
+          setStreaming(true);
+          if (ev.stage !== "start" && ev.stage !== "resume") advance(ev.stage);
+          if (ev.msg) setLiveMsg(ev.msg);
+        } else if (ev.event === "interrupt") {
+          gotNewInterrupt = true;
+          setStreaming(false);
+          setInterrupt({
+            type: ev.type,
+            message: ev.msg,
+            plan: ev.plan,
+            verified_gaps: ev.verified_gaps,
+          });
+        } else if (ev.event === "done" || ev.event === "error") {
+          setStreaming(false);
+          setLiveStage(null);
+        }
+      });
+    } catch {
+      /* fall back to polling */
+    } finally {
+      setResuming(false);
+      if (!gotNewInterrupt) {
+        setInterrupt(null);
+        api.getResults(sessionId).then(setResult).catch(() => {});
+      }
+    }
+  };
+
+  // HITL gate pending — focus the approval card.
+  if (interrupt) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <Link href="/" className="text-xs text-white/30 hover:text-white/50 transition-colors">
+            ← Dashboard
+          </Link>
+          <h2 className="text-2xl font-bold text-white/90 mt-1">Approval Required</h2>
+          <p className="text-sm text-white/40 font-mono mt-1">{sessionId}</p>
+        </div>
+        <PipelineProgress
+          activeStage={liveStage}
+          completedStages={completedStages}
+          message={liveMsg}
+        />
+        <ApprovalCard payload={interrupt} onDecision={handleDecision} busy={resuming} />
+      </div>
+    );
+  }
 
   if (!sessionId) {
     return (

@@ -17,6 +17,12 @@ export interface SessionStatus {
   session_id: string;
   status: string;
   cost_so_far: number;
+  interrupt?: {
+    type?: string;
+    message?: string;
+    plan?: Record<string, unknown>;
+    verified_gaps?: Record<string, unknown>[];
+  } | null;
 }
 
 export interface CostDetail {
@@ -69,10 +75,11 @@ export interface StartResearchRequest {
   user_background?: string;
   source?: "web" | "zotero" | "both";
   stream?: boolean;
+  hitl_gates?: string[];
 }
 
 export interface StreamEvent {
-  event: "progress" | "node" | "done" | "error";
+  event: "progress" | "node" | "interrupt" | "done" | "error";
   stage?: string;
   msg?: string;
   status?: string;
@@ -80,6 +87,16 @@ export interface StreamEvent {
   count?: number;
   cost_so_far?: number;
   message?: string;
+  // interrupt payload
+  type?: string;
+  plan?: Record<string, unknown>;
+  verified_gaps?: Record<string, unknown>[];
+}
+
+export interface ResumeRequest {
+  action: "approve" | "edit" | "reject";
+  plan?: Record<string, unknown>;
+  verified_gaps?: Record<string, unknown>[];
 }
 
 export interface SettingsResponse {
@@ -199,6 +216,7 @@ export const api = {
 
     es.addEventListener("progress", handle("progress") as EventListener);
     es.addEventListener("node", handle("node") as EventListener);
+    es.addEventListener("interrupt", handle("interrupt") as EventListener);
     es.addEventListener("done", handle("done") as EventListener);
     es.addEventListener("error", handle("error") as EventListener);
     es.onerror = (err) => {
@@ -207,5 +225,51 @@ export const api = {
     };
 
     return () => es.close();
+  },
+
+  // Resume an interrupted session at a HITL gate. POST returns an SSE stream;
+  // parsed via fetch + ReadableStream (EventSource cannot POST).
+  resumeSession: async (
+    sessionId: string,
+    body: ResumeRequest,
+    onEvent: (ev: StreamEvent) => void,
+  ): Promise<void> => {
+    const res = await fetch(`${API_BASE}/research/${sessionId}/resume`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Resume ${res.status}: ${text}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE frames are separated by a blank line.
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        let event = "message";
+        let data = "";
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) data += line.slice(5).trim();
+        }
+        if (!data) continue;
+        try {
+          onEvent({ event: event as StreamEvent["event"], ...JSON.parse(data) });
+        } catch {
+          /* ignore malformed frame */
+        }
+      }
+    }
   },
 };

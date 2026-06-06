@@ -13,6 +13,8 @@ export default function NewResearchPage() {
   const [phase, setPhase] = useState(3);
   const [background, setBackground] = useState("");
   const [source, setSource] = useState<"web" | "zotero" | "both">("web");
+  const [gatePlan, setGatePlan] = useState(false);
+  const [gateGaps, setGateGaps] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [keysConfigured, setKeysConfigured] = useState(true);
@@ -43,6 +45,10 @@ export default function NewResearchPage() {
     setError("");
 
     try {
+      const hitl_gates: string[] = [];
+      if (gatePlan) hitl_gates.push("plan");
+      if (gateGaps) hitl_gates.push("gaps");
+
       const res = await api.startResearch({
         question: question.trim(),
         max_papers: maxPapers,
@@ -50,6 +56,7 @@ export default function NewResearchPage() {
         user_background: background.trim(),
         source,
         stream: true,
+        hitl_gates,
       });
       router.push(`/session?id=${res.session_id}`);
     } catch (err) {
@@ -190,6 +197,48 @@ export default function NewResearchPage() {
                   <p className="text-xs text-white/35 mt-1">{p.desc}</p>
                 </button>
               ))}
+            </div>
+          </div>
+
+          {/* Human-in-the-loop gates */}
+          <div>
+            <label className="block text-sm font-medium text-white/60 mb-3">
+              Approval Gates <span className="text-white/30 font-normal">(optional — pause for your review)</span>
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setGatePlan((v) => !v)}
+                className={`glass-subtle p-4 text-left transition-all cursor-pointer ${
+                  gatePlan ? "bg-white/[0.06]" : "hover:bg-white/[0.03]"
+                }`}
+                style={gatePlan ? { borderColor: "var(--accent-amber)", borderWidth: 1 } : {}}
+              >
+                <div className="flex items-center justify-between">
+                  <span className={`text-sm font-semibold ${gatePlan ? "text-[var(--accent-amber)]" : "text-white/70"}`}>
+                    Pause at Plan
+                  </span>
+                  <span className={`w-2 h-2 rounded-full ${gatePlan ? "bg-[var(--accent-amber)]" : "bg-white/20"}`} />
+                </div>
+                <p className="text-xs text-white/35 mt-1">Approve the search plan before searching</p>
+              </button>
+              <button
+                type="button"
+                onClick={() => setGateGaps((v) => !v)}
+                disabled={phase < 3}
+                className={`glass-subtle p-4 text-left transition-all cursor-pointer disabled:opacity-30 ${
+                  gateGaps ? "bg-white/[0.06]" : "hover:bg-white/[0.03]"
+                }`}
+                style={gateGaps ? { borderColor: "var(--accent-amber)", borderWidth: 1 } : {}}
+              >
+                <div className="flex items-center justify-between">
+                  <span className={`text-sm font-semibold ${gateGaps ? "text-[var(--accent-amber)]" : "text-white/70"}`}>
+                    Pause at Gaps
+                  </span>
+                  <span className={`w-2 h-2 rounded-full ${gateGaps ? "bg-[var(--accent-amber)]" : "bg-white/20"}`} />
+                </div>
+                <p className="text-xs text-white/35 mt-1">Approve verified gaps before ideation (Phase 3)</p>
+              </button>
             </div>
           </div>
 

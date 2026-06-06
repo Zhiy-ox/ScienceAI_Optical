@@ -6,7 +6,9 @@ from langgraph.graph import END, StateGraph
 
 from science_ai.orchestrator.graph.edges import (
     after_gap_retry_decision,
+    after_gaps_gate,
     after_idea_regen_decision,
+    after_plan_gate,
     after_refine_decision,
 )
 from science_ai.orchestrator.graph.nodes import (
@@ -17,9 +19,11 @@ from science_ai.orchestrator.graph.nodes import (
     experiment_node,
     gap_detect_node,
     gap_retry_decision_node,
+    gaps_gate_node,
     idea_node,
     idea_regen_decision_node,
     index_node,
+    plan_gate_node,
     plan_node,
     refine_decision_node,
     report_node,
@@ -43,6 +47,8 @@ def build_graph(*, checkpointer=None):
 
     # --- Nodes ---
     g.add_node("plan", plan_node)
+    g.add_node("plan_gate", plan_gate_node)
+    g.add_node("gaps_gate", gaps_gate_node)
     g.add_node("search", search_node)
     g.add_node("triage", triage_node)
     g.add_node("select_papers", select_papers_node)
@@ -63,7 +69,15 @@ def build_graph(*, checkpointer=None):
 
     # --- Edges ---
     g.set_entry_point("plan")
-    g.add_edge("plan", "search")
+
+    # HITL gate: plan → plan_gate → (search | END if rejected)
+    g.add_edge("plan", "plan_gate")
+    g.add_conditional_edges(
+        "plan_gate",
+        after_plan_gate,
+        {"approved": "search", "rejected": END},
+    )
+
     g.add_edge("search", "triage")
     g.add_edge("triage", "select_papers")
 
@@ -101,15 +115,23 @@ def build_graph(*, checkpointer=None):
     g.add_edge("gap_detect", "verify")
     g.add_edge("verify", "gap_retry_decision")
 
-    # Loop 2 (gap re-detection) + Phase-2 exit
+    # Loop 2 (gap re-detection) + Phase-2 exit.
+    # Phase-3 path routes through the gaps HITL gate before ideation.
     g.add_conditional_edges(
         "gap_retry_decision",
         after_gap_retry_decision,
         {
             "retry": "gap_detect",
             "exit_phase2": END,
-            "continue_to_idea": "idea",
+            "continue_to_idea": "gaps_gate",
         },
+    )
+
+    # HITL gate: gaps_gate → (idea | END if rejected)
+    g.add_conditional_edges(
+        "gaps_gate",
+        after_gaps_gate,
+        {"approved": "idea", "rejected": END},
     )
 
     # --- Idea → Experiment ---

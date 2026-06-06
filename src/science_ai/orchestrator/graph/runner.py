@@ -90,6 +90,7 @@ class GraphRunner:
         vector_store: Any = None,
         embedding_fn: Any = None,
         zotero_client: Any = None,
+        hitl_gates: list[str] | None = None,
     ) -> dict[str, Any]:
         """Kick off the graph and return the final state as a result dict."""
         session_id = session_id or str(uuid.uuid4())
@@ -97,6 +98,7 @@ class GraphRunner:
 
         initial_state = self._make_initial_state(
             question, session_id, phase, max_papers, user_background, source,
+            hitl_gates,
         )
         config = self._make_config(
             session_id, tracker,
@@ -131,6 +133,7 @@ class GraphRunner:
         vector_store: Any = None,
         embedding_fn: Any = None,
         zotero_client: Any = None,
+        hitl_gates: list[str] | None = None,
     ):
         """Drive the graph and yield ``(stream_mode, chunk)`` tuples live.
 
@@ -142,6 +145,7 @@ class GraphRunner:
 
         initial_state = self._make_initial_state(
             question, session_id, phase, max_papers, user_background, source,
+            hitl_gates,
         )
         config = self._make_config(
             session_id, tracker,
@@ -156,6 +160,37 @@ class GraphRunner:
         ):
             yield mode, chunk
 
+    async def resume(
+        self,
+        session_id: str,
+        decision: dict[str, Any],
+        *,
+        cost_tracker: CostTracker | None = None,
+        graph_store: Any = None,
+        vector_store: Any = None,
+        embedding_fn: Any = None,
+        zotero_client: Any = None,
+    ):
+        """Resume an interrupted session and stream the continuation.
+
+        Yields ``(stream_mode, chunk)`` tuples just like ``stream()``.
+        """
+        from langgraph.types import Command
+
+        tracker = cost_tracker or CostTracker()
+        config = self._make_config(
+            session_id, tracker,
+            graph_store=graph_store, vector_store=vector_store,
+            embedding_fn=embedding_fn, zotero_client=zotero_client,
+        )
+
+        logger.info("GraphRunner: resuming session %s", session_id)
+
+        async for mode, chunk in self._graph.astream(
+            Command(resume=decision), config, stream_mode=["updates", "custom"],
+        ):
+            yield mode, chunk
+
     def _make_initial_state(
         self,
         question: str,
@@ -164,6 +199,7 @@ class GraphRunner:
         max_papers: int,
         user_background: str,
         source: str,
+        hitl_gates: list[str] | None = None,
     ) -> dict[str, Any]:
         return {
             "session_id": session_id,
@@ -172,6 +208,7 @@ class GraphRunner:
             "phase": phase,
             "user_background": user_background,
             "source": source,
+            "hitl_gates": hitl_gates or [],
             "all_papers": [],
             "triage_results": [],
             "knowledge_objects": [],
@@ -224,3 +261,18 @@ class GraphRunner:
         """Return the raw StateSnapshot (values + next pending nodes)."""
         config = {"configurable": {"thread_id": session_id}}
         return await self._graph.aget_state(config)
+
+    async def get_pending_interrupt(self, session_id: str) -> dict[str, Any] | None:
+        """Return the payload of a pending HITL interrupt, or None if not paused."""
+        snapshot = await self.get_snapshot(session_id)
+        if not snapshot:
+            return None
+        # langgraph surfaces interrupts on the snapshot and/or its pending tasks.
+        interrupts = getattr(snapshot, "interrupts", None)
+        if interrupts:
+            return getattr(interrupts[0], "value", None)
+        for task in getattr(snapshot, "tasks", None) or []:
+            t_int = getattr(task, "interrupts", None)
+            if t_int:
+                return getattr(t_int[0], "value", None)
+        return None

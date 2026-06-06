@@ -14,6 +14,14 @@ class StartResearchRequest(BaseModel):
     user_background: str = Field(default="", description="Optional researcher background for personalization")
     source: str = Field(default="web", description="Paper source: 'web', 'zotero', or 'both'")
     stream: bool = Field(default=False, description="If true (graph mode), defer execution to the SSE /stream endpoint")
+    hitl_gates: list[str] = Field(default_factory=list, description="Approval gates to pause at, e.g. ['plan', 'gaps']")
+
+
+class ResumeRequest(BaseModel):
+    """Resume an interrupted (awaiting-input) session at a HITL gate."""
+    action: str = Field(default="approve", description="'approve' | 'edit' | 'reject'")
+    plan: dict | None = Field(default=None, description="Edited plan (when action='edit' at the plan gate)")
+    verified_gaps: list[dict] | None = Field(default=None, description="Edited gaps (when action='edit' at the gaps gate)")
 
 
 # -- Responses --
@@ -51,6 +59,7 @@ class SessionStatus(BaseModel):
     session_id: str
     status: str
     cost_so_far: float = 0.0
+    interrupt: dict | None = None  # populated when status == "awaiting_input"
 
 
 class CostDetail(BaseModel):

@@ -16,6 +16,7 @@ from science_ai.api.schemas import (
     HealthResponse,
     ProviderTestResult,
     ResearchResult,
+    ResumeRequest,
     SessionCreated,
     SessionListItem,
     SessionStatus,
@@ -81,6 +82,8 @@ async def start_research(
         "max_papers": request.max_papers,
         "user_background": request.user_background,
         "source": request.source,
+        "hitl_gates": request.hitl_gates,
+        "interrupt": None,
         "result": None,
     }
     _cost_trackers[session_id] = CostTracker()
@@ -124,8 +127,18 @@ async def get_session_status(session_id: str):
 
 async def _graph_session_status(session_id: str) -> SessionStatus:
     """Derive session status from checkpointer state."""
-    # If the session is still tracked in _sessions as "running", trust that.
     in_memory = _sessions.get(session_id)
+
+    # Paused at a HITL gate — surface the interrupt payload for the approval card.
+    if in_memory and in_memory.get("status") == "awaiting_input":
+        tracker = _cost_trackers.get(session_id)
+        cost = tracker.session_total(session_id) if tracker else 0.0
+        return SessionStatus(
+            session_id=session_id, status="awaiting_input",
+            cost_so_far=round(cost, 4), interrupt=in_memory.get("interrupt"),
+        )
+
+    # If the session is still tracked in _sessions as "running", trust that.
     if in_memory and in_memory["status"] == "running":
         tracker = _cost_trackers.get(session_id)
         cost = tracker.session_total(session_id) if tracker else 0.0
@@ -290,6 +303,55 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+
+async def _consume_graph_stream(session_id, session, tracker, runner, stream_iter):
+    """Consume a runner stream/resume iterator and yield SSE frames.
+
+    Detects HITL interrupts: when the graph pauses, emits an ``interrupt``
+    event carrying the gate payload and stops (the graph is checkpointed and
+    awaits ``/resume``). Otherwise finalizes the session on completion.
+    """
+    try:
+        async for mode, chunk in stream_iter:
+            if mode == "custom":
+                yield _sse("progress", chunk)
+            elif mode == "updates":
+                if isinstance(chunk, dict) and "__interrupt__" in chunk:
+                    intr = chunk["__interrupt__"]
+                    try:
+                        payload = intr[0].value
+                    except Exception:
+                        payload = {}
+                    session["status"] = "awaiting_input"
+                    session["interrupt"] = payload
+                    yield _sse("interrupt", payload)
+                    return
+                for node, upd in chunk.items():
+                    status = upd.get("status") if isinstance(upd, dict) else None
+                    yield _sse("node", {"node": node, "status": status})
+
+        # No interrupt — the graph ran to completion.
+        state = await runner.get_state(session_id)
+        if state is not None:
+            state["cost_summary"] = tracker.session_summary(session_id)
+            session["result"] = state
+        session["status"] = "completed"
+        session["interrupt"] = None
+        cost = tracker.session_total(session_id)
+        yield _sse("done", {"status": "completed", "cost_so_far": round(cost, 4)})
+    except Exception as e:
+        logger.exception("Stream failed for session %s", session_id)
+        session["status"] = "failed"
+        session["result"] = {"status": "failed"}
+        yield _sse("error", {"message": str(e)})
+
+
 @router.get("/research/{session_id}/stream")
 async def stream_research(session_id: str):
     """Stream live pipeline progress via Server-Sent Events (graph mode).
@@ -297,6 +359,7 @@ async def stream_research(session_id: str):
     Drives the graph for sessions created with ``stream=true`` and emits:
       - ``progress`` events: human-readable stage updates from nodes
       - ``node`` events: a graph node finished (with its status)
+      - ``interrupt`` events: a HITL gate is awaiting approval
       - ``done`` / ``error``: terminal events
     """
     from science_ai.config import settings as cfg
@@ -325,49 +388,71 @@ async def stream_research(session_id: str):
         )
         session["status"] = "running"
 
-        try:
-            yield _sse("progress", {"stage": "start", "msg": "Pipeline starting…"})
-
-            async for mode, chunk in runner.stream(
-                session["question"],
-                session_id=session_id,
-                phase=session["phase"],
-                max_papers=session.get("max_papers", 15),
-                user_background=session.get("user_background", ""),
-                source=session.get("source", "web"),
-                cost_tracker=tracker,
-                graph_store=graph_store,
-                zotero_client=zotero_client,
-            ):
-                if mode == "custom":
-                    yield _sse("progress", chunk)
-                elif mode == "updates":
-                    for node, upd in chunk.items():
-                        status = upd.get("status") if isinstance(upd, dict) else None
-                        yield _sse("node", {"node": node, "status": status})
-
-            # Finalize: read the aggregated state from the checkpointer.
-            state = await runner.get_state(session_id)
-            if state is not None:
-                state["cost_summary"] = tracker.session_summary(session_id)
-                session["result"] = state
-            session["status"] = "completed"
-            cost = tracker.session_total(session_id)
-            yield _sse("done", {"status": "completed", "cost_so_far": round(cost, 4)})
-        except Exception as e:
-            logger.exception("Stream failed for session %s", session_id)
-            session["status"] = "failed"
-            session["result"] = {"status": "failed"}
-            yield _sse("error", {"message": str(e)})
+        yield _sse("progress", {"stage": "start", "msg": "Pipeline starting…"})
+        stream_iter = runner.stream(
+            session["question"],
+            session_id=session_id,
+            phase=session["phase"],
+            max_papers=session.get("max_papers", 15),
+            user_background=session.get("user_background", ""),
+            source=session.get("source", "web"),
+            cost_tracker=tracker,
+            graph_store=graph_store,
+            zotero_client=zotero_client,
+            hitl_gates=session.get("hitl_gates", []),
+        )
+        async for frame in _consume_graph_stream(
+            session_id, session, tracker, runner, stream_iter,
+        ):
+            yield frame
 
     return StreamingResponse(
-        event_gen(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        event_gen(), media_type="text/event-stream", headers=_SSE_HEADERS,
+    )
+
+
+@router.post("/research/{session_id}/resume")
+async def resume_research(session_id: str, body: ResumeRequest):
+    """Resume an interrupted session at a HITL gate, streaming the continuation."""
+    from science_ai.config import settings as cfg
+
+    session = _sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if cfg.orchestrator_mode != "graph":
+        raise HTTPException(status_code=400, detail="Resume requires graph mode")
+    if session.get("status") != "awaiting_input":
+        raise HTTPException(status_code=409, detail="Session is not awaiting input")
+
+    decision = {"action": body.action}
+    if body.plan is not None:
+        decision["plan"] = body.plan
+    if body.verified_gaps is not None:
+        decision["verified_gaps"] = body.verified_gaps
+
+    async def event_gen():
+        runner = await _get_graph_runner()
+        tracker = _cost_trackers.setdefault(session_id, CostTracker())
+        graph_store, zotero_client = _build_session_resources(
+            session["phase"], session.get("source", "web"), cfg,
+        )
+        session["status"] = "running"
+        session["interrupt"] = None
+
+        yield _sse("progress", {"stage": "resume", "msg": f"Resuming ({body.action})…"})
+        stream_iter = runner.resume(
+            session_id, decision,
+            cost_tracker=tracker,
+            graph_store=graph_store,
+            zotero_client=zotero_client,
+        )
+        async for frame in _consume_graph_stream(
+            session_id, session, tracker, runner, stream_iter,
+        ):
+            yield frame
+
+    return StreamingResponse(
+        event_gen(), media_type="text/event-stream", headers=_SSE_HEADERS,
     )
 
 
@@ -591,6 +676,7 @@ async def _run_pipeline(
         try:
             runner = await _get_graph_runner()
             graph_store, zotero_client = _build_session_resources(phase, source, cfg)
+            hitl_gates = _sessions.get(session_id, {}).get("hitl_gates", [])
 
             result = await runner.run(
                 question=question,
@@ -602,9 +688,17 @@ async def _run_pipeline(
                 cost_tracker=tracker,
                 graph_store=graph_store,
                 zotero_client=zotero_client,
+                hitl_gates=hitl_gates,
             )
-            _sessions[session_id]["result"] = result
-            _sessions[session_id]["status"] = "completed"
+
+            # If a HITL gate paused the run, surface it for /resume.
+            pending = await runner.get_pending_interrupt(session_id)
+            if pending is not None:
+                _sessions[session_id]["status"] = "awaiting_input"
+                _sessions[session_id]["interrupt"] = pending
+            else:
+                _sessions[session_id]["result"] = result
+                _sessions[session_id]["status"] = "completed"
         except Exception:
             logger.exception("Graph pipeline failed for session %s", session_id)
             _sessions[session_id]["status"] = "failed"
