@@ -222,8 +222,8 @@ Ported the 3 loops to `add_conditional_edges` using `FeedbackController` thresho
 **Stage 3 — Postgres checkpointing (durable resume)** ✅ *Done*
 Checkpointer factory (`checkpointer.py`) creates `AsyncPostgresSaver` if `checkpointer_dsn` is configured and Postgres is reachable, otherwise falls back to `MemorySaver` (in-memory). `GraphRunner` refactored as a shared singleton: LLM client + search + checkpointer are shared across sessions; per-session resources (cost tracker, graph store, zotero client) passed to `run()`. Status/results endpoints read from the checkpointer in graph mode (survives restart); `_sessions` kept as a lightweight in-memory registry for active runs. App lifespan hook closes the Postgres connection on shutdown.
 
-**Stage 4 — Parallel fan-out**
-Convert deep-read & critique to `Send` map-reduce with a shared semaphore. Benchmark wall-clock vs. serial on a 15-paper run.
+**Stage 4 — Parallel fan-out** ✅ *Done*
+Deep-read and critique converted to `Send` map-reduce: `deep_read_dispatch` emits one `Send("deep_read_one", ...)` per paper; `critique_dispatch` emits one `Send("critique_one", ...)` per KO. Results fan-in via `operator.add` reducer. Concurrency capped by `Deps.fanout_semaphore` (default 5). Empty-list dispatch fallback uses `Send` to the next node to avoid graph dead-ends. Fan-in edges connect workers to the next pipeline stage.
 
 **Stage 5 — Streaming SSE**
 Add `/research/{id}/stream`; emit `get_stream_writer()` progress from nodes. Dashboard subscribes via `EventSource`; render `<PipelineProgress>`. Keep polling as fallback.

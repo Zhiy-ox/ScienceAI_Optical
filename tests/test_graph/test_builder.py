@@ -14,7 +14,8 @@ def test_graph_has_expected_nodes():
     expected = {
         "__start__", "__end__",
         "plan", "search", "triage", "select_papers",
-        "deep_read", "refine_decision", "critique", "index",
+        "deep_read_one", "refine_decision",
+        "critique_one", "index",
         "gap_detect", "verify", "gap_retry_decision",
         "idea", "experiment", "idea_regen_decision",
         "report", "zotero_export",
@@ -33,3 +34,14 @@ def test_graph_has_feedback_loop_edges():
     assert ("gap_retry_decision", "gap_detect") in pairs
     # Loop 3: idea_regen_decision → idea
     assert ("idea_regen_decision", "idea") in pairs
+
+
+def test_graph_has_fanout_edges():
+    """Fan-out nodes must have edges to their parallel workers."""
+    graph = build_graph()
+    edges = graph.get_graph().edges
+    pairs = {(e.source, e.target) for e in edges}
+    # deep_read_one fans in to refine_decision
+    assert ("deep_read_one", "refine_decision") in pairs
+    # critique_one fans in to gap_detect
+    assert ("critique_one", "gap_detect") in pairs

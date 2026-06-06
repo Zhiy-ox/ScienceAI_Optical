@@ -10,8 +10,10 @@ from science_ai.orchestrator.graph.edges import (
     after_refine_decision,
 )
 from science_ai.orchestrator.graph.nodes import (
-    critique_node,
-    deep_read_node,
+    critique_dispatch,
+    critique_one,
+    deep_read_dispatch,
+    deep_read_one,
     experiment_node,
     gap_detect_node,
     gap_retry_decision_node,
@@ -33,19 +35,22 @@ from science_ai.orchestrator.graph.state import ResearchState
 def build_graph(*, checkpointer=None):
     """Construct and compile the research pipeline graph.
 
-    Stage 2: linear topology + three bounded feedback loops wired as
-    conditional edges (search refinement, gap re-detection, idea regeneration).
+    Stages 1-4: linear topology with phase-exit conditional edges,
+    three bounded feedback loops, and parallel fan-out for deep-read
+    and critique via the Send API.
     """
     g = StateGraph(ResearchState)
 
-    # --- Add nodes ---
+    # --- Nodes ---
     g.add_node("plan", plan_node)
     g.add_node("search", search_node)
     g.add_node("triage", triage_node)
     g.add_node("select_papers", select_papers_node)
-    g.add_node("deep_read", deep_read_node)
+    # Fan-out nodes for deep read
+    g.add_node("deep_read_one", deep_read_one)
+    # Feedback decision + fan-out for critique
     g.add_node("refine_decision", refine_decision_node)
-    g.add_node("critique", critique_node)
+    g.add_node("critique_one", critique_one)
     g.add_node("index", index_node)
     g.add_node("gap_detect", gap_detect_node)
     g.add_node("verify", verify_node)
@@ -56,13 +61,21 @@ def build_graph(*, checkpointer=None):
     g.add_node("report", report_node)
     g.add_node("zotero_export", zotero_export_node)
 
-    # --- Plan → Search → Triage → Select → Deep read ---
+    # --- Edges ---
     g.set_entry_point("plan")
     g.add_edge("plan", "search")
     g.add_edge("search", "triage")
     g.add_edge("triage", "select_papers")
-    g.add_edge("select_papers", "deep_read")
-    g.add_edge("deep_read", "refine_decision")
+
+    # Fan-out: select_papers → deep_read_one (parallel via Send)
+    # Empty-list fallback sends to refine_decision directly.
+    g.add_conditional_edges(
+        "select_papers", deep_read_dispatch,
+        ["deep_read_one", "refine_decision"],
+    )
+
+    # Fan-in: all deep_read_one results merge via reducer → refine_decision
+    g.add_edge("deep_read_one", "refine_decision")
 
     # Loop 1 (search refinement) + Phase-1 exit
     g.add_conditional_edges(
@@ -71,13 +84,20 @@ def build_graph(*, checkpointer=None):
         {
             "refine": "search",
             "exit_phase1": END,
-            "continue_to_critique": "critique",
+            "continue_to_critique": "index",
         },
     )
 
-    # --- Critique → Index → Gap detect → Verify ---
-    g.add_edge("critique", "index")
-    g.add_edge("index", "gap_detect")
+    # Fan-out: index → critique_one (parallel via Send)
+    # Empty-list fallback sends to gap_detect directly.
+    g.add_conditional_edges(
+        "index", critique_dispatch,
+        ["critique_one", "gap_detect"],
+    )
+
+    # Fan-in: all critique_one results merge → gap_detect
+    g.add_edge("critique_one", "gap_detect")
+
     g.add_edge("gap_detect", "verify")
     g.add_edge("verify", "gap_retry_decision")
 

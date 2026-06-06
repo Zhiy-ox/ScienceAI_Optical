@@ -197,23 +197,24 @@ async def select_papers_node(state: ResearchState, config: RunnableConfig) -> di
 
 
 # ------------------------------------------------------------------
-# Stage 5: Deep Read (serial in Stage 1; parallel fan-out in Stage 4)
+# Stage 5: Deep Read — parallel fan-out via Send
 # ------------------------------------------------------------------
 
-async def deep_read_node(state: ResearchState, config: RunnableConfig) -> dict[str, Any]:
-    deps = get_deps(config)
-    sid = state["session_id"]
+def deep_read_dispatch(state: ResearchState) -> list:
+    """Fan-out: emit one Send per paper to deep-read in parallel.
+
+    Returns a list of ``Send("deep_read_one", {...})`` commands. LangGraph
+    runs them concurrently; results reduce into ``knowledge_objects`` via
+    the ``operator.add`` reducer.
+    """
+    from langgraph.types import Send
+
     papers_to_read = state.get("papers_to_read", [])
     all_papers = state.get("all_papers", [])
-
     paper_lookup = {p["paper_id"]: p for p in all_papers}
-
-    from science_ai.agents.deep_reader import DeepReader
-
-    reader = DeepReader(deps.llm, session_id=sid)
-    knowledge_objects: list[dict] = []
     already_read = {ko.get("paper_id") for ko in state.get("knowledge_objects", [])}
 
+    sends = []
     for triage in papers_to_read:
         pid = triage.get("paper_id", "")
         if pid in already_read:
@@ -221,45 +222,97 @@ async def deep_read_node(state: ResearchState, config: RunnableConfig) -> dict[s
         paper = paper_lookup.get(pid)
         if not paper:
             continue
-
         priority = "high" if triage.get("priority") == "must_read" else "medium"
-        text = paper.get("abstract", "")
+        sends.append(Send("deep_read_one", {
+            "session_id": state["session_id"],
+            "paper_id": pid,
+            "title": paper.get("title", ""),
+            "abstract": paper.get("abstract", ""),
+            "priority": priority,
+        }))
 
-        try:
-            ko = await reader.run(
-                paper_text=text, paper_id=pid, title=paper.get("title", ""),
-                priority=priority,
-            )
-            knowledge_objects.append(ko)
-        except Exception:
-            logger.exception("Failed to deep-read paper %s", pid)
+    if not sends:
+        logger.info("[graph] deep_read_dispatch: nothing to read, skipping to refine_decision")
+        return [Send("refine_decision", state)]
 
-    logger.info("[graph] deep_read_node: %d KOs", len(knowledge_objects))
-    return {"knowledge_objects": knowledge_objects, "status": "deep_read"}
+    logger.info("[graph] deep_read_dispatch: %d papers to fan-out", len(sends))
+    return sends
 
 
-# ------------------------------------------------------------------
-# Stage 6: Critique
-# ------------------------------------------------------------------
-
-async def critique_node(state: ResearchState, config: RunnableConfig) -> dict[str, Any]:
+async def deep_read_one(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+    """Read a single paper. Runs concurrently, capped by Deps.fanout_semaphore."""
     deps = get_deps(config)
     sid = state["session_id"]
+    pid = state["paper_id"]
+
+    from science_ai.agents.deep_reader import DeepReader
+
+    async with deps.fanout_semaphore:
+        reader = DeepReader(deps.llm, session_id=sid)
+        try:
+            ko = await reader.run(
+                paper_text=state.get("abstract", ""),
+                paper_id=pid,
+                title=state.get("title", ""),
+                priority=state.get("priority", "medium"),
+            )
+            logger.info("[graph] deep_read_one: %s done", pid)
+            return {"knowledge_objects": [ko]}
+        except Exception:
+            logger.exception("Failed to deep-read paper %s", pid)
+            return {"knowledge_objects": []}
+
+
+# ------------------------------------------------------------------
+# Stage 6: Critique — parallel fan-out via Send
+# ------------------------------------------------------------------
+
+def critique_dispatch(state: ResearchState) -> list:
+    """Fan-out: emit one Send per KO to critique in parallel.
+
+    If no KOs need critiquing, returns a Send to ``gap_detect`` to avoid
+    a dead-end in the graph.
+    """
+    from langgraph.types import Send
+
     knowledge_objects = state.get("knowledge_objects", [])
+    already_critiqued = {c.get("paper_id") for c in state.get("critiques", [])}
+
+    sends = []
+    for ko in knowledge_objects:
+        pid = ko.get("paper_id", "")
+        if pid in already_critiqued:
+            continue
+        sends.append(Send("critique_one", {
+            "session_id": state["session_id"],
+            "knowledge_obj": ko,
+        }))
+
+    if not sends:
+        logger.info("[graph] critique_dispatch: nothing to critique, skipping to gap_detect")
+        return [Send("gap_detect", state)]
+
+    logger.info("[graph] critique_dispatch: %d KOs to fan-out", len(sends))
+    return sends
+
+
+async def critique_one(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+    """Critique a single knowledge object. Runs concurrently."""
+    deps = get_deps(config)
+    sid = state["session_id"]
+    ko = state["knowledge_obj"]
 
     from science_ai.agents.critique import CritiqueAgent
 
-    critique_agent = CritiqueAgent(deps.llm, session_id=sid)
-    critiques: list[dict] = []
-    for ko in knowledge_objects:
+    async with deps.fanout_semaphore:
+        critique_agent = CritiqueAgent(deps.llm, session_id=sid)
         try:
             critique = await critique_agent.run(knowledge_obj=ko)
-            critiques.append(critique)
+            logger.info("[graph] critique_one: %s done", ko.get("paper_id"))
+            return {"critiques": [critique]}
         except Exception:
             logger.exception("Failed to critique paper %s", ko.get("paper_id"))
-
-    logger.info("[graph] critique_node: %d critiques", len(critiques))
-    return {"critiques": critiques, "status": "critiqued"}
+            return {"critiques": []}
 
 
 # ------------------------------------------------------------------
