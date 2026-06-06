@@ -387,8 +387,51 @@ async def _run_pipeline(
     source: str = "web",
 ) -> None:
     """Background task that runs the research pipeline."""
+    from science_ai.config import settings as cfg
+
     tracker = _cost_trackers.get(session_id, CostTracker())
 
+    # ---- Graph-based orchestrator (LangGraph) ----
+    if cfg.orchestrator_mode == "graph":
+        try:
+            from science_ai.orchestrator.graph.runner import GraphRunner
+
+            graph_store = None
+            if phase >= 3:
+                from science_ai.storage.graph_store import InMemoryGraphStore
+                graph_store = InMemoryGraphStore()
+
+            zotero_client = None
+            if source in ("zotero", "both") and cfg.zotero_library_id and cfg.zotero_api_key:
+                from science_ai.services.zotero_client import ZoteroClient
+                zotero_client = ZoteroClient(
+                    library_id=cfg.zotero_library_id,
+                    api_key=cfg.zotero_api_key,
+                    library_type=cfg.zotero_library_type,
+                )
+
+            runner = GraphRunner(
+                cost_tracker=tracker,
+                graph_store=graph_store,
+                zotero_client=zotero_client,
+            )
+            result = await runner.run(
+                question=question,
+                session_id=session_id,
+                phase=phase,
+                max_papers=max_papers,
+                user_background=user_background,
+                source=source,
+            )
+            _sessions[session_id]["result"] = result
+            _sessions[session_id]["status"] = "completed"
+        except Exception:
+            logger.exception("Graph pipeline failed for session %s", session_id)
+            _sessions[session_id]["status"] = "failed"
+            _sessions[session_id]["result"] = {"status": "failed"}
+        return
+
+    # ---- Legacy sequential orchestrator ----
     # Use InMemoryGraphStore for Phase 3 (no Neo4j dependency required)
     graph_store = None
     if phase >= 3:
@@ -398,7 +441,6 @@ async def _run_pipeline(
     # Set up Zotero client if source includes zotero
     zotero_client = None
     if source in ("zotero", "both"):
-        from science_ai.config import settings as cfg
         if cfg.zotero_library_id and cfg.zotero_api_key:
             from science_ai.services.zotero_client import ZoteroClient
             zotero_client = ZoteroClient(

@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     cli_claude_command: str = "claude"
     cli_timeout_seconds: int = 120
 
+    # Orchestrator mode: "legacy" (sequential) or "graph" (LangGraph)
+    orchestrator_mode: str = "legacy"
+
     # Cost budget (USD) — pipeline stops if exceeded
     cost_budget_usd: float = Field(default=10.0)
 
