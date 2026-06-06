@@ -7,6 +7,32 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Thresholds shared by the legacy orchestrator and the graph decision nodes.
+KEYWORD_NOVELTY_THRESHOLD = 0.3   # Loop 1: refine if >30% of discovered keywords are new
+VERIFICATION_THRESHOLD = 0.3      # Loop 2: retry if <30% of gaps verified
+FEASIBILITY_THRESHOLD = 0.4       # Loop 3: regenerate if feasibility < 0.4
+MAX_LOOP_ITERATIONS = 3
+
+
+def keyword_novelty_ratio(
+    original_keywords: list[str], discovered_keywords: list[str]
+) -> float:
+    """Fraction of discovered keywords that are new vs. the original set."""
+    if not discovered_keywords:
+        return 0.0
+    original_set = {k.lower() for k in original_keywords}
+    new = [k for k in discovered_keywords if k.lower() not in original_set]
+    return len(new) / len(discovered_keywords)
+
+
+def verification_pass_ratio(verification_results: list[dict[str, Any]]) -> float:
+    """Fraction of gaps that were verified as genuine."""
+    total = len(verification_results)
+    if total == 0:
+        return 1.0
+    verified = sum(1 for r in verification_results if r.get("status") == "verified_gap")
+    return verified / total
+
 
 class FeedbackController:
     """Manages the three feedback loops defined in the architecture.

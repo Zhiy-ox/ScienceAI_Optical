@@ -100,15 +100,22 @@ class GraphRunner:
             "search_refine_count": 0,
             "gap_retry_count": 0,
             "idea_regen_count": 0,
+            "refine_keywords": [],
+            "previous_failures": [],
+            "regen_constraint": "",
+            "gap_retry_pending": False,
+            "idea_regen_pending": False,
             "status": "starting",
             "papers_found": 0,
         }
 
         config = {
+            # Loops can push past LangGraph's default 25-step recursion limit.
+            "recursion_limit": 100,
             "configurable": {
                 "thread_id": session_id,
                 "deps": self._build_deps(),
-            }
+            },
         }
 
         logger.info("GraphRunner: starting session %s (phase=%d)", session_id, phase)

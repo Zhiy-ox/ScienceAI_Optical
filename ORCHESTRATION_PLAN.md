@@ -213,11 +213,11 @@ async def plan_node(state: ResearchState, config) -> dict:
 
 ## 5. Incremental Rollout — each stage shippable & testable
 
-**Stage 1 — Foundation (linear graph, flagged, in-memory checkpointer)**
+**Stage 1 — Foundation (linear graph, flagged, in-memory checkpointer)** ✅ *Done*
 State + Deps + nodes for the happy path (plan→search→triage→select→deep_read→critique→index→gap→verify→idea→experiment→report→zotero), wired as a straight line with phase-exit edges. `ORCHESTRATOR_MODE=graph` runs it via `MemorySaver`. Validate output parity vs. legacy on a Phase-1 run.
 
-**Stage 2 — Feedback loops as conditional edges**
-Port the 3 loops to `add_conditional_edges` using `FeedbackController` thresholds + state counters. Unit-test each router (refine / gap-retry / idea-regen) for trigger + max-iteration bounds.
+**Stage 2 — Feedback loops as conditional edges** ✅ *Done*
+Ported the 3 loops to `add_conditional_edges` using `FeedbackController` thresholds + state counters. Each loop is a `*_decision` node (mutates transient state, increments a checkpointed counter) feeding a pure router (`after_refine_decision` / `after_gap_retry_decision` / `after_idea_regen_decision`). Processing nodes (search/triage/select/deep_read) made re-entrant so loop passes only handle new items (reducers never double-count). Bounded by `MAX_LOOP_ITERATIONS=3`; runner sets `recursion_limit=100`. Unit-tested each router + decision node (trigger + max-iteration bounds) plus an e2e refinement-loop run through `ainvoke`.
 
 **Stage 3 — Postgres checkpointing (durable resume)**
 Swap `MemorySaver` → `AsyncPostgresSaver`. Retire `_sessions`; status/results read from `aget_state`. Test: kill & restart server mid-run, confirm resume from last node.

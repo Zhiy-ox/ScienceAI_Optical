@@ -35,6 +35,13 @@ class ResearchState(TypedDict, total=False):
     gap_retry_count: int
     idea_regen_count: int
 
+    # --- loop control (transient, set by decision nodes, read by routers) ---
+    refine_keywords: list[str]       # new keywords to search in a refinement pass
+    previous_failures: list[dict]    # failed verifications fed back to gap_detect
+    regen_constraint: str            # feasibility constraint fed back to idea
+    gap_retry_pending: bool
+    idea_regen_pending: bool
+
     # --- meta ---
     status: str
     papers_found: int

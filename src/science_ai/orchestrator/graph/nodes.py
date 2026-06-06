@@ -11,6 +11,14 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from science_ai.orchestrator.feedback import (
+    FEASIBILITY_THRESHOLD,
+    KEYWORD_NOVELTY_THRESHOLD,
+    MAX_LOOP_ITERATIONS,
+    VERIFICATION_THRESHOLD,
+    keyword_novelty_ratio,
+    verification_pass_ratio,
+)
 from science_ai.orchestrator.graph.deps import get_deps
 from science_ai.orchestrator.graph.state import ResearchState
 
@@ -39,62 +47,84 @@ async def plan_node(state: ResearchState, config: RunnableConfig) -> dict[str, A
 # ------------------------------------------------------------------
 
 async def search_node(state: ResearchState, config: RunnableConfig) -> dict[str, Any]:
+    """Search for papers.
+
+    Re-entrant: on a refinement pass (``refine_keywords`` set), searches only the
+    new keywords; otherwise runs the plan's queries. Only papers not already in
+    ``all_papers`` are returned, so the ``operator.add`` reducer never duplicates.
+    """
     deps = get_deps(config)
-    sid = state["session_id"]
     plan = state.get("plan", {})
     source = state.get("source", "web")
     question = state["question"]
 
-    from science_ai.services.paper_search import PaperMeta
+    existing = state.get("all_papers", [])
+    seen_ids: set[str] = {p["paper_id"] for p in existing}
+    seen_titles: set[str] = {p.get("title", "").lower().strip() for p in existing}
+    refine_keywords = state.get("refine_keywords", [])
 
-    all_papers: list[PaperMeta] = []
-    seen_ids: set[str] = set()
+    new_papers: list[Any] = []
 
-    if source in ("web", "both"):
-        search_queries = plan.get("search_queries", [])
-        scope = plan.get("scope", {})
-        year_range = scope.get("year_range")
-        if year_range and isinstance(year_range, list) and len(year_range) == 2:
-            year_range = tuple(year_range)
-        else:
-            year_range = None
+    def _add(papers: list[Any]) -> None:
+        for p in papers:
+            if p.paper_id in seen_ids:
+                continue
+            title_key = p.title.lower().strip()
+            if title_key in seen_titles:
+                continue
+            seen_ids.add(p.paper_id)
+            seen_titles.add(title_key)
+            new_papers.append(p)
 
-        for sq in search_queries:
-            keywords = sq.get("keywords", [])
-            src = sq.get("source", "semantic_scholar")
-            query_str = " ".join(keywords)
+    if refine_keywords:
+        # --- Refinement pass: search the newly-discovered keywords ---
+        for kw in refine_keywords[:5]:
             try:
-                papers = await deps.search.search(
-                    query_str, sources=[src], limit=50, year_range=year_range,
-                )
-                for p in papers:
-                    if p.paper_id not in seen_ids:
-                        seen_ids.add(p.paper_id)
-                        all_papers.append(p)
+                _add(await deps.search.search(kw, limit=30))
             except Exception:
-                logger.exception("Search failed for query: %s", query_str)
+                logger.exception("Refinement search failed for keyword: %s", kw)
+    else:
+        # --- Initial pass: run the plan's search queries (+ optional Zotero) ---
+        if source in ("web", "both"):
+            search_queries = plan.get("search_queries", [])
+            scope = plan.get("scope", {})
+            year_range = scope.get("year_range")
+            if year_range and isinstance(year_range, list) and len(year_range) == 2:
+                year_range = tuple(year_range)
+            else:
+                year_range = None
 
-    if source in ("zotero", "both") and deps.zotero_client:
-        try:
-            zotero_papers = deps.zotero_client.search(question, limit=50)
-            seen_titles = {p.title.lower().strip() for p in all_papers}
-            for zp in zotero_papers:
-                if zp.title.lower().strip() not in seen_titles:
-                    all_papers.append(zp)
-                    seen_titles.add(zp.title.lower().strip())
-            logger.info("Added %d papers from Zotero", len(zotero_papers))
-        except Exception:
-            logger.exception("Zotero search failed")
+            for sq in search_queries:
+                keywords = sq.get("keywords", [])
+                src = sq.get("source", "semantic_scholar")
+                query_str = " ".join(keywords)
+                try:
+                    _add(await deps.search.search(
+                        query_str, sources=[src], limit=50, year_range=year_range,
+                    ))
+                except Exception:
+                    logger.exception("Search failed for query: %s", query_str)
+
+        if source in ("zotero", "both") and deps.zotero_client:
+            try:
+                _add(deps.zotero_client.search(question, limit=50))
+            except Exception:
+                logger.exception("Zotero search failed")
 
     paper_dicts = [
         {"paper_id": p.paper_id, "title": p.title, "abstract": p.abstract}
-        for p in all_papers
+        for p in new_papers
     ]
+    total = len(existing) + len(paper_dicts)
 
-    logger.info("[graph] search_node found %d papers", len(all_papers))
+    logger.info(
+        "[graph] search_node: +%d new papers (%d total)%s",
+        len(paper_dicts), total, " [refinement]" if refine_keywords else "",
+    )
     return {
         "all_papers": paper_dicts,
-        "papers_found": len(all_papers),
+        "papers_found": total,
+        "refine_keywords": [],  # consume so the reducer state is clean for the next pass
         "status": "searched",
     }
 
@@ -104,6 +134,7 @@ async def search_node(state: ResearchState, config: RunnableConfig) -> dict[str,
 # ------------------------------------------------------------------
 
 async def triage_node(state: ResearchState, config: RunnableConfig) -> dict[str, Any]:
+    """Triage papers. Re-entrant: only triages papers not already triaged."""
     deps = get_deps(config)
     sid = state["session_id"]
     all_papers = state.get("all_papers", [])
@@ -111,14 +142,21 @@ async def triage_node(state: ResearchState, config: RunnableConfig) -> dict[str,
     if not all_papers:
         return {"triage_results": [], "status": "no_papers_found"}
 
+    already = {r.get("paper_id") for r in state.get("triage_results", [])}
+    to_triage = [p for p in all_papers if p["paper_id"] not in already]
+
+    if not to_triage:
+        logger.info("[graph] triage_node: nothing new to triage")
+        return {"status": "triaged"}
+
     from science_ai.agents.paper_triage import PaperTriage
 
     triage_agent = PaperTriage(deps.llm, session_id=sid)
     triage_results = await triage_agent.run(
-        question=state["question"], papers=all_papers,
+        question=state["question"], papers=to_triage,
     )
 
-    logger.info("[graph] triage_node: %d results", len(triage_results))
+    logger.info("[graph] triage_node: %d new results", len(triage_results))
     return {"triage_results": triage_results, "status": "triaged"}
 
 
@@ -127,16 +165,32 @@ async def triage_node(state: ResearchState, config: RunnableConfig) -> dict[str,
 # ------------------------------------------------------------------
 
 async def select_papers_node(state: ResearchState, config: RunnableConfig) -> dict[str, Any]:
+    """Pick the next batch of papers to deep-read.
+
+    Excludes already-read papers. On a refinement pass the total budget doubles
+    (matches the legacy ``max_papers * 2`` ceiling).
+    """
     triage_results = state.get("triage_results", [])
     max_papers = state.get("max_papers", 15)
+    already_read = {ko.get("paper_id") for ko in state.get("knowledge_objects", [])}
+    is_refinement = state.get("search_refine_count", 0) > 0
 
-    must_read = [r for r in triage_results if r.get("priority") == "must_read"]
-    worth_reading = [r for r in triage_results if r.get("priority") == "worth_reading"]
+    cap = max_papers * 2 if is_refinement else max_papers
+    remaining = max(0, cap - len(already_read))
 
-    papers_to_read = must_read[:max_papers]
-    remaining = max_papers - len(papers_to_read)
-    if remaining > 0:
-        papers_to_read.extend(worth_reading[:remaining])
+    must_read = [
+        r for r in triage_results
+        if r.get("priority") == "must_read" and r.get("paper_id") not in already_read
+    ]
+    worth_reading = [
+        r for r in triage_results
+        if r.get("priority") == "worth_reading" and r.get("paper_id") not in already_read
+    ]
+
+    papers_to_read = must_read[:remaining]
+    leftover = remaining - len(papers_to_read)
+    if leftover > 0:
+        papers_to_read.extend(worth_reading[:leftover])
 
     logger.info("[graph] select_papers_node: %d selected", len(papers_to_read))
     return {"papers_to_read": papers_to_read, "status": "selected"}
@@ -158,9 +212,12 @@ async def deep_read_node(state: ResearchState, config: RunnableConfig) -> dict[s
 
     reader = DeepReader(deps.llm, session_id=sid)
     knowledge_objects: list[dict] = []
+    already_read = {ko.get("paper_id") for ko in state.get("knowledge_objects", [])}
 
     for triage in papers_to_read:
         pid = triage.get("paper_id", "")
+        if pid in already_read:
+            continue
         paper = paper_lookup.get(pid)
         if not paper:
             continue
@@ -247,9 +304,17 @@ async def gap_detect_node(state: ResearchState, config: RunnableConfig) -> dict[
         deps.llm, session_id=sid,
         embedding_fn=deps.embedding_fn, graph_store=deps.graph_store,
     )
-    gaps = await gap_detector.run(
-        knowledge_objects=knowledge_objects, critiques=critiques,
-    )
+
+    # On a retry pass (Feedback Loop 2), feed prior verification failures as context.
+    run_kwargs: dict[str, Any] = {
+        "knowledge_objects": knowledge_objects,
+        "critiques": critiques,
+    }
+    previous_failures = state.get("previous_failures")
+    if previous_failures:
+        run_kwargs["previous_failures"] = previous_failures
+
+    gaps = await gap_detector.run(**run_kwargs)
 
     logger.info("[graph] gap_detect_node: %d gaps", len(gaps))
     return {"gaps": gaps, "status": "gaps_detected"}
@@ -301,11 +366,17 @@ async def idea_node(state: ResearchState, config: RunnableConfig) -> dict[str, A
 
     from science_ai.agents.idea_generator import IdeaGenerator
 
+    # On a regeneration pass (Feedback Loop 3), append the feasibility constraint.
+    user_background = state.get("user_background", "")
+    regen_constraint = state.get("regen_constraint", "")
+    if regen_constraint:
+        user_background = f"{user_background}\n{regen_constraint}".strip()
+
     idea_gen = IdeaGenerator(deps.llm, session_id=sid)
     ideas = await idea_gen.run(
         verified_gaps=verified_gaps,
         knowledge_objects=knowledge_objects,
-        user_background=state.get("user_background", ""),
+        user_background=user_background,
     )
 
     logger.info("[graph] idea_node: %d ideas", len(ideas))
@@ -404,6 +475,123 @@ async def zotero_export_node(state: ResearchState, config: RunnableConfig) -> di
     except Exception:
         logger.exception("Failed to export session to Zotero")
         return {"status": "completed", "cost_summary": _build_cost_summary(deps, sid)}
+
+
+# ------------------------------------------------------------------
+# Feedback-loop decision nodes (Stage 2)
+#
+# Each decision node *only* inspects state and sets transient control fields.
+# The matching router in edges.py reads those fields to pick the next node.
+# Loop counters live in state (checkpointed), bounded by MAX_LOOP_ITERATIONS.
+# ------------------------------------------------------------------
+
+# Keywords for extracting discovered terms from knowledge objects (Loop 1).
+
+def _discovered_keywords(knowledge_objects: list[dict]) -> list[str]:
+    discovered: list[str] = []
+    for ko in knowledge_objects:
+        method = ko.get("method", {})
+        if method.get("key_components"):
+            discovered.extend(method["key_components"])
+        problem = ko.get("research_problem", {})
+        statement = problem.get("statement")
+        if statement and len(statement.split()) >= 2:
+            discovered.append(statement)
+    return discovered
+
+
+async def refine_decision_node(state: ResearchState, config: RunnableConfig) -> dict[str, Any]:
+    """Loop 1: decide whether to refine the search with newly-discovered keywords."""
+    plan = state.get("plan", {})
+    knowledge_objects = state.get("knowledge_objects", [])
+    count = state.get("search_refine_count", 0)
+
+    original_keywords: list[str] = []
+    for sq in plan.get("search_queries", []):
+        original_keywords.extend(sq.get("keywords", []))
+    discovered = _discovered_keywords(knowledge_objects)
+    ratio = keyword_novelty_ratio(original_keywords, discovered)
+
+    if count < MAX_LOOP_ITERATIONS and discovered and ratio > KEYWORD_NOVELTY_THRESHOLD:
+        original_set = {k.lower() for k in original_keywords}
+        new_keywords = [k for k in discovered if k.lower() not in original_set]
+        logger.info(
+            "[graph] refine_decision: %.0f%% new keywords → refining (iter %d)",
+            ratio * 100, count + 1,
+        )
+        return {
+            "refine_keywords": new_keywords[:5],
+            "search_refine_count": count + 1,
+            "status": "refining_search",
+        }
+
+    return {"refine_keywords": []}
+
+
+async def gap_retry_decision_node(state: ResearchState, config: RunnableConfig) -> dict[str, Any]:
+    """Loop 2: decide whether to re-run gap detection after weak verification."""
+    verification_results = state.get("verification_results", [])
+    count = state.get("gap_retry_count", 0)
+    ratio = verification_pass_ratio(verification_results)
+
+    if (
+        count < MAX_LOOP_ITERATIONS
+        and verification_results
+        and ratio < VERIFICATION_THRESHOLD
+    ):
+        failed = [
+            v for v in verification_results if v.get("status") != "verified_gap"
+        ]
+        logger.info(
+            "[graph] gap_retry_decision: only %.0f%% verified → retrying (iter %d)",
+            ratio * 100, count + 1,
+        )
+        return {
+            "previous_failures": failed,
+            "gap_retry_count": count + 1,
+            "gap_retry_pending": True,
+            "status": "retrying_gaps",
+        }
+
+    return {"gap_retry_pending": False, "previous_failures": []}
+
+
+async def idea_regen_decision_node(state: ResearchState, config: RunnableConfig) -> dict[str, Any]:
+    """Loop 3: decide whether to regenerate ideas whose experiments are infeasible."""
+    experiment_plans = state.get("experiment_plans", [])
+    count = state.get("idea_regen_count", 0)
+
+    if not experiment_plans:
+        return {"idea_regen_pending": False}
+
+    min_feasibility = min(
+        (p.get("feasibility_score", 0.5) for p in experiment_plans), default=1.0
+    )
+
+    if count < MAX_LOOP_ITERATIONS and min_feasibility < FEASIBILITY_THRESHOLD:
+        # Collect risks from the infeasible plans to constrain regeneration.
+        risks: list[str] = []
+        for p in experiment_plans:
+            if p.get("feasibility_score", 0.5) < FEASIBILITY_THRESHOLD:
+                plan_risks = p.get("experiment_plan", {}).get("risks", [])
+                if isinstance(plan_risks, list):
+                    risks.extend(str(r) for r in plan_risks)
+        constraint = (
+            "Constraint: previous ideas were infeasible due to: "
+            + "; ".join(risks[:5])
+        )
+        logger.info(
+            "[graph] idea_regen_decision: feasibility=%.2f → regenerating (iter %d)",
+            min_feasibility, count + 1,
+        )
+        return {
+            "regen_constraint": constraint,
+            "idea_regen_count": count + 1,
+            "idea_regen_pending": True,
+            "status": "regenerating_ideas",
+        }
+
+    return {"idea_regen_pending": False, "regen_constraint": ""}
 
 
 def _build_cost_summary(deps: Any, session_id: str) -> dict:
