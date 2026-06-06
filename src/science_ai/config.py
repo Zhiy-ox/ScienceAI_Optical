@@ -41,8 +41,9 @@ class Settings(BaseSettings):
     cli_claude_command: str = "claude"
     cli_timeout_seconds: int = 120
 
-    # Orchestrator mode: "legacy" (sequential) or "graph" (LangGraph)
-    orchestrator_mode: str = "legacy"
+    # Orchestrator mode: "graph" (LangGraph, default) or "legacy" (deprecated
+    # sequential orchestrator, kept as a fallback during the cutover soak period)
+    orchestrator_mode: str = "graph"
 
     # Graph checkpointer DSN (psycopg v3 format).
     # Empty string = use in-memory MemorySaver (no durability).

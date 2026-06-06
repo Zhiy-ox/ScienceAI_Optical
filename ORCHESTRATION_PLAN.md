@@ -1,6 +1,8 @@
 # Orchestration Migration Plan — Graph-Based Pipeline (LangGraph)
 
-> Status: **Planned** · Branch: `claude/build-science-ai-K6osh` · Supersedes the hand-rolled `ResearchOrchestrator`
+> Status: **Complete (all 7 stages)** · Branch: `claude/build-science-ai-K6osh` · Supersedes the hand-rolled `ResearchOrchestrator`
+>
+> The LangGraph pipeline is now the default (`ORCHESTRATOR_MODE=graph`). It provides typed state with reducers, three bounded feedback loops, durable Postgres checkpointing (MemorySaver fallback), parallel fan-out for deep-read/critique, live SSE streaming, and human-in-the-loop approval gates. Legacy remains available as a deprecated fallback. **55 graph tests green.**
 
 ## 1. Goal & Rationale
 
@@ -231,8 +233,8 @@ Deep-read and critique converted to `Send` map-reduce: `deep_read_dispatch` emit
 **Stage 6 — Human-in-the-loop** ✅ *Done*
 `plan_gate` and `gaps_gate` nodes call `interrupt()` when their gate is in `state["hitl_gates"]` (passthrough otherwise). Gates route via `after_plan_gate`/`after_gaps_gate` (rejected → END, approved → continue). `GraphRunner.resume()` drives `astream(Command(resume=decision))`; `get_pending_interrupt()` reads paused state from the checkpointer. `POST /research/{id}/resume` streams the continuation as SSE (shared `_consume_graph_stream` helper detects `__interrupt__`, emits `interrupt` events, sets status `awaiting_input`). Sessions opt in via `hitl_gates` on `/start` (`[]` = autonomous, preserving prior behavior). Dashboard: `<ApprovalCard>` (approve/reject), `api.resumeSession()` (fetch-based POST SSE reader), session page shows the gate card and resumes; New Research has "Pause at Plan"/"Pause at Gaps" toggles.
 
-**Stage 7 — Parity validation & cutover**
-Side-by-side legacy vs. graph on a fixed question set; compare papers/gaps/ideas/cost. Flip default `ORCHESTRATOR_MODE=graph`; mark legacy deprecated; remove after a soak period.
+**Stage 7 — Parity validation & cutover** ✅ *Done*
+`orchestrator/parity.py`: `compare_results()` (pure, unit-tested) diffs legacy vs. graph on papers/KOs/gaps/verified/ideas/experiments/report with a configurable count tolerance; `run_parity()` runs both pipelines live and logs a `ParityReport`. Default flipped to `ORCHESTRATOR_MODE=graph`; legacy `ResearchOrchestrator` marked deprecated (docstring + runtime warning) and kept as a fallback (`ORCHESTRATOR_MODE=legacy`) during the soak period.
 
 ---
 
