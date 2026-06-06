@@ -23,6 +23,9 @@ dependencies = [
     "openai>=1.50.0",
     "qdrant-client>=1.12.0",
     "pyzotero>=1.6.0",
+    "langgraph>=0.2",
+    "langgraph-checkpoint-postgres>=2.0",
+    "psycopg[binary]>=3.2",
 ]
 
 [project.optional-dependencies]

@@ -1,4 +1,11 @@
-"""Main orchestrator — drives the research pipeline end-to-end."""
+"""Legacy sequential orchestrator — drives the research pipeline end-to-end.
+
+.. deprecated::
+    Superseded by the LangGraph pipeline in ``orchestrator/graph/`` (now the
+    default via ``ORCHESTRATOR_MODE=graph``). Retained as a fallback during the
+    cutover soak period; will be removed once parity is confirmed in production.
+    Set ``ORCHESTRATOR_MODE=legacy`` to use this path.
+"""
 
 from __future__ import annotations
 
@@ -56,6 +63,11 @@ class ResearchOrchestrator:
         monitor: PipelineMonitor | None = None,
     ) -> None:
         from science_ai.config import settings
+
+        logger.warning(
+            "ResearchOrchestrator (legacy sequential pipeline) is deprecated; "
+            "the LangGraph pipeline (ORCHESTRATOR_MODE=graph) is now the default."
+        )
 
         self.cost_tracker = cost_tracker or CostTracker()
 

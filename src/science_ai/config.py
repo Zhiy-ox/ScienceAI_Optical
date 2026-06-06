@@ -41,6 +41,16 @@ class Settings(BaseSettings):
     cli_claude_command: str = "claude"
     cli_timeout_seconds: int = 240
 
+    # Orchestrator mode: "graph" (LangGraph, default) or "legacy" (deprecated
+    # sequential orchestrator, kept as a fallback during the cutover soak period)
+    orchestrator_mode: str = "graph"
+
+    # Graph checkpointer DSN (psycopg v3 format).
+    # Empty string = use in-memory MemorySaver (no durability).
+    # Set to e.g. "postgresql://scienceai:scienceai@localhost:5432/scienceai"
+    # to enable durable resume across server restarts.
+    checkpointer_dsn: str = ""
+
     # Cost budget (USD) — pipeline stops if exceeded
     cost_budget_usd: float = Field(default=10.0)
 

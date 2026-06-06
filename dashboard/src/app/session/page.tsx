@@ -4,7 +4,13 @@ import { useEffect, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import GlassCard, { StatCard, StatusBadge } from "@/components/GlassCard";
-import { api, type ResearchResult } from "@/lib/api";
+import PipelineProgress, { PIPELINE_STAGES } from "@/components/PipelineProgress";
+import ApprovalCard, { type InterruptPayload } from "@/components/ApprovalCard";
+import { api, type ResearchResult, type StreamEvent } from "@/lib/api";
+
+const STAGE_INDEX: Record<string, number> = Object.fromEntries(
+  PIPELINE_STAGES.map((s, i) => [s.key, i])
+);
 
 function SessionContent() {
   const searchParams = useSearchParams();
@@ -13,6 +19,16 @@ function SessionContent() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState("overview");
+
+  // Live streaming progress
+  const [liveStage, setLiveStage] = useState<string | null>(null);
+  const [liveMsg, setLiveMsg] = useState<string | null>(null);
+  const [completedStages, setCompletedStages] = useState<Set<string>>(new Set());
+  const [streaming, setStreaming] = useState(false);
+
+  // Human-in-the-loop gate
+  const [interrupt, setInterrupt] = useState<InterruptPayload | null>(null);
+  const [resuming, setResuming] = useState(false);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -42,19 +58,132 @@ function SessionContent() {
         });
     };
 
+    // Try live SSE streaming first; falls back to polling on done/error.
+    const markStage = (stage: string) => {
+      const idx = STAGE_INDEX[stage];
+      if (idx === undefined) return;
+      setLiveStage(stage);
+      setCompletedStages((prev) => {
+        const next = new Set(prev);
+        PIPELINE_STAGES.forEach((s, i) => {
+          if (i < idx) next.add(s.key);
+        });
+        return next;
+      });
+    };
+
+    const onEvent = (ev: StreamEvent) => {
+      if (cancelled) return;
+      if (ev.event === "progress" && ev.stage) {
+        setStreaming(true);
+        if (ev.stage !== "start" && ev.stage !== "resume") markStage(ev.stage);
+        if (ev.msg) setLiveMsg(ev.msg);
+      } else if (ev.event === "interrupt") {
+        // Pipeline paused at a HITL gate — show the approval card.
+        setStreaming(false);
+        setLiveMsg(null);
+        setInterrupt({
+          type: ev.type,
+          message: ev.msg,
+          plan: ev.plan,
+          verified_gaps: ev.verified_gaps,
+        });
+      } else if (ev.event === "done" || ev.event === "error") {
+        setStreaming(false);
+        setLiveStage(null);
+        fetchResults();
+      }
+    };
+
+    const unsubscribe = api.streamSession(sessionId, onEvent, () => {
+      // SSE not available — fall back to polling.
+      if (!cancelled) fetchResults();
+    });
+
     fetchResults();
 
-    // Auto-refresh polling when status is running
+    // Auto-refresh polling fallback when not streaming.
     const interval = setInterval(() => {
       if (result?.status === "completed" || result?.status === "failed") return;
-      fetchResults();
+      if (!streaming) fetchResults();
     }, 5000);
 
     return () => {
       cancelled = true;
       clearInterval(interval);
+      unsubscribe();
     };
-  }, [sessionId, result?.status]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  const handleDecision = async (action: "approve" | "reject") => {
+    setResuming(true);
+    let gotNewInterrupt = false;
+
+    const advance = (stage: string) => {
+      const idx = STAGE_INDEX[stage];
+      if (idx === undefined) return;
+      setLiveStage(stage);
+      setCompletedStages((prev) => {
+        const next = new Set(prev);
+        PIPELINE_STAGES.forEach((s, i) => {
+          if (i < idx) next.add(s.key);
+        });
+        return next;
+      });
+    };
+
+    try {
+      await api.resumeSession(sessionId, { action }, (ev) => {
+        if (ev.event === "progress" && ev.stage) {
+          setStreaming(true);
+          if (ev.stage !== "start" && ev.stage !== "resume") advance(ev.stage);
+          if (ev.msg) setLiveMsg(ev.msg);
+        } else if (ev.event === "interrupt") {
+          gotNewInterrupt = true;
+          setStreaming(false);
+          setInterrupt({
+            type: ev.type,
+            message: ev.msg,
+            plan: ev.plan,
+            verified_gaps: ev.verified_gaps,
+          });
+        } else if (ev.event === "done" || ev.event === "error") {
+          setStreaming(false);
+          setLiveStage(null);
+        }
+      });
+    } catch {
+      /* fall back to polling */
+    } finally {
+      setResuming(false);
+      if (!gotNewInterrupt) {
+        setInterrupt(null);
+        api.getResults(sessionId).then(setResult).catch(() => {});
+      }
+    }
+  };
+
+  // HITL gate pending — focus the approval card.
+  if (interrupt) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <Link href="/" className="text-xs text-white/30 hover:text-white/50 transition-colors">
+            ← Dashboard
+          </Link>
+          <h2 className="text-2xl font-bold text-white/90 mt-1">Approval Required</h2>
+          <p className="text-sm text-white/40 font-mono mt-1">{sessionId}</p>
+        </div>
+        <PipelineProgress
+          activeStage={liveStage}
+          completedStages={completedStages}
+          message={liveMsg}
+        />
+        <ApprovalCard payload={interrupt} onDecision={handleDecision} busy={resuming} />
+      </div>
+    );
+  }
 
   if (!sessionId) {
     return (
@@ -71,13 +200,24 @@ function SessionContent() {
     return (
       <div className="space-y-6">
         <div className="shimmer h-8 w-64" />
+        {(streaming || liveStage) && (
+          <PipelineProgress
+            activeStage={liveStage}
+            completedStages={completedStages}
+            message={liveMsg}
+          />
+        )}
         <div className="grid grid-cols-4 gap-4">
           {[1, 2, 3, 4].map((i) => <div key={i} className="shimmer h-24" />)}
         </div>
         <div className="shimmer h-64" />
         {!error && (
           <div className="text-center">
-            <p className="text-white/40 text-sm">Pipeline is running... auto-refreshing every 5s</p>
+            <p className="text-white/40 text-sm">
+              {streaming
+                ? "Pipeline is running — live progress above"
+                : "Pipeline is running... auto-refreshing every 5s"}
+            </p>
           </div>
         )}
       </div>
@@ -127,6 +267,15 @@ function SessionContent() {
         </div>
         <StatusBadge status={result.status} />
       </div>
+
+      {/* Live pipeline progress (visible while streaming) */}
+      {streaming && (
+        <PipelineProgress
+          activeStage={liveStage}
+          completedStages={completedStages}
+          message={liveMsg}
+        />
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4">

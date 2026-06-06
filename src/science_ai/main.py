@@ -25,7 +25,12 @@ async def lifespan(app: FastAPI):
     await init_db()
     yield
     logger.info("ScienceAI shutting down")
-    await close_db()
+    # Clean up graph checkpointer (closes Postgres connection if open)
+    try:
+        from science_ai.orchestrator.graph.checkpointer import close_checkpointer
+        await close_checkpointer()
+    except Exception:
+        pass
 
 
 app = FastAPI(
