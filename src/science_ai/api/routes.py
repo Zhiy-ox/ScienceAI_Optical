@@ -330,7 +330,7 @@ async def test_settings():
     # Test CLI tools (if CLI backend is active)
     if settings.llm_backend == "cli":
         import shutil
-        for tool_name, cmd in [("codex", settings.cli_codex_command), ("gemini", settings.cli_gemini_command), ("claude", settings.cli_claude_command)]:
+        for tool_name, cmd in [("codex", settings.cli_codex_command), ("antigravity", settings.cli_antigravity_command), ("claude", settings.cli_claude_command)]:
             found = shutil.which(cmd)
             results.append(ProviderTestResult(
                 provider=f"cli:{tool_name}",

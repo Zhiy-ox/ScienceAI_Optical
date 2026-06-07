@@ -49,7 +49,7 @@ To use the free CLI backend instead of paid APIs, install the three CLI tools:
 ```bash
 npm install -g @anthropic-ai/claude-code   # claude
 npm install -g @openai/codex               # codex
-npm install -g @google/gemini-cli           # gemini
+curl -fsSL https://antigravity.google/cli/install.sh | bash  # agy
 ```
 
 Then set **CLI Mode** in the Settings page (`localhost:3000/settings`) or set `LLM_BACKEND=cli` in your `.env`.

@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     # LLM Backend: "api" (paid, via litellm) or "cli" (free, via local CLI tools)
     llm_backend: str = "cli"
     cli_codex_command: str = "codex"
-    cli_gemini_command: str = "gemini"
+    cli_antigravity_command: str = "agy"
     cli_claude_command: str = "claude"
     cli_timeout_seconds: int = 240
 
@@ -101,7 +101,7 @@ MODEL_PRICING: dict[str, dict] = {
         "supports_reasoning_effort": False,
         "supports_tool_search": False,
     },
-    "cli:gemini": {
+    "cli:antigravity": {
         "provider": "cli",
         "input_per_m": 0.0,
         "output_per_m": 0.0,

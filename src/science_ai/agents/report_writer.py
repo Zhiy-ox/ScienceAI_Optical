@@ -97,7 +97,7 @@ class ReportWriter(BaseAgent):
                 "year": ko.get("year"),
                 "method": ko.get("method", {}).get("core_idea"),
                 "problem": ko.get("research_problem", {}).get("statement"),
-                "limitations": [l.get("description") for l in ko.get("limitations", [])],
+                "limitations": [limitation.get("description") for limitation in ko.get("limitations", [])],
                 "key_results": [r.get("claim") for r in ko.get("experiments", {}).get("key_results", [])],
             }
             for ko in knowledge_objects
