@@ -1,4 +1,4 @@
-"""CLI-based LLM client — calls Gemini CLI, Codex CLI, and Claude Code via subprocess.
+"""CLI-based LLM client — calls Antigravity CLI, Codex CLI, and Claude Code via subprocess.
 
 Drop-in replacement for LLMClient that routes tasks to locally-installed CLI tools
 instead of paid API endpoints. Cost is $0.00 per call.
@@ -24,12 +24,12 @@ logger = logging.getLogger(__name__)
 CLI_TASK_MAP: dict[str, str] = {
     "query_planning":     "codex",    # fast structured planning
     "task_routing":       "codex",    # simple routing decisions
-    "paper_triage":       "gemini",   # bulk processing, large context
+    "paper_triage":       "antigravity",  # bulk processing, large context
     "deep_read_high":     "claude",   # deep analysis, long-form extraction
     "deep_read_medium":   "claude",   # deep analysis
     "critique":           "claude",   # critical thinking
     "gap_detection":      "codex",    # multi-mechanism synthesis
-    "verification":       "gemini",   # search + verification
+    "verification":       "antigravity",  # search + verification
     "idea_generation":    "codex",    # creative generation
     "experiment_planning": "codex",   # structured planning
     "report_writing":     "claude",   # long-form writing
@@ -50,13 +50,13 @@ class CLILLMClient:
         self,
         cost_tracker: CostTracker | None = None,
         codex_cmd: str = "codex",
-        gemini_cmd: str = "gemini",
+        antigravity_cmd: str = "agy",
         claude_cmd: str = "claude",
         timeout: int = 120,
     ) -> None:
         self.cost_tracker = cost_tracker or CostTracker()
         self.codex_cmd = codex_cmd
-        self.gemini_cmd = gemini_cmd
+        self.antigravity_cmd = antigravity_cmd
         self.claude_cmd = claude_cmd
         self.timeout = timeout
 
@@ -300,9 +300,9 @@ class CLILLMClient:
         if cli_tool == "codex":
             # codex exec — non-interactive mode; prompt via stdin for large inputs
             return [self.codex_cmd, "exec", "--full-auto", "-"], True
-        elif cli_tool == "gemini":
-            # gemini reads prompt from stdin in non-interactive/headless mode
-            return [self.gemini_cmd], True
+        elif cli_tool == "antigravity":
+            # Antigravity CLI supports one-shot prompts with -p.
+            return [self.antigravity_cmd, "-p", prompt], False
         elif cli_tool == "claude":
             # claude --print -p "..." — accepts prompt as argument
             return [self.claude_cmd, "--print", "-p", prompt], False

@@ -2,7 +2,6 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 import science_ai.api.routes as routes_module

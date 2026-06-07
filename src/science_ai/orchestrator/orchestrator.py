@@ -78,11 +78,11 @@ class ResearchOrchestrator:
             self.llm = CLILLMClient(
                 cost_tracker=self.cost_tracker,
                 codex_cmd=settings.cli_codex_command,
-                gemini_cmd=settings.cli_gemini_command,
+                antigravity_cmd=settings.cli_antigravity_command,
                 claude_cmd=settings.cli_claude_command,
                 timeout=settings.cli_timeout_seconds,
             )
-            logger.info("Using CLI backend (free mode): codex + gemini + claude")
+            logger.info("Using CLI backend (free mode): codex + antigravity + claude")
         else:
             self.llm = LLMClient(cost_tracker=self.cost_tracker)
             logger.info("Using API backend (paid mode): litellm")
@@ -496,7 +496,6 @@ class ResearchOrchestrator:
         zotero_collection_key = None
         if self.zotero_client:
             try:
-                from science_ai.services.paper_search import PaperMeta
                 # Reconstruct all_papers from phase1 (stored in triage_results via paper_id)
                 all_papers_meta = phase2_result.get("_all_papers", [])
                 zotero_collection_key = self.zotero_client.export_session(

@@ -12,7 +12,6 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import JSON, String, Text, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from science_ai.storage.models import Base

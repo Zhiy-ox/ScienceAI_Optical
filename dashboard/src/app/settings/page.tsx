@@ -152,7 +152,7 @@ export default function SettingsPage() {
               <span className="glass-badge badge-completed text-[10px]">FREE</span>
             </div>
             <p className="text-xs text-white/35">
-              Uses locally installed Gemini CLI, Codex CLI, and Claude Code via subprocess. No API costs.
+              Uses locally installed Antigravity CLI, Codex CLI, and Claude Code via subprocess. No API costs.
             </p>
           </button>
           <button
@@ -180,7 +180,7 @@ export default function SettingsPage() {
             <p className="text-xs text-white/60 font-medium">Setup CLI tools (one-time install)</p>
             <pre className="text-xs text-[var(--accent-teal)] font-mono bg-black/20 rounded p-2 select-all leading-relaxed">{`npm install -g @anthropic-ai/claude-code   # claude
 npm install -g @openai/codex               # codex
-npm install -g @google/gemini-cli          # gemini`}</pre>
+curl -fsSL https://antigravity.google/cli/install.sh | bash  # agy`}</pre>
             <p className="text-xs text-white/40">
               After installing, use{" "}
               <span className="text-white/60">&quot;Test Connections&quot;</span>{" "}
