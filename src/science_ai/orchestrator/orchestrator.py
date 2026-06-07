@@ -484,7 +484,6 @@ class ResearchOrchestrator:
         zotero_collection_key = None
         if self.zotero_client:
             try:
-                from science_ai.services.paper_search import PaperMeta
                 # Reconstruct all_papers from phase1 (stored in triage_results via paper_id)
                 all_papers_meta = phase2_result.get("_all_papers", [])
                 zotero_collection_key = self.zotero_client.export_session(

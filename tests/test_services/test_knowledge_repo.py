@@ -1,6 +1,8 @@
 """Tests for cross-session knowledge persistence (in-memory SQLite)."""
 
 import pytest
+
+pytest.importorskip("aiosqlite")
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from science_ai.storage.knowledge_repo import KnowledgeEntry, KnowledgeRepository

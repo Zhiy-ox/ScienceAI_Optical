@@ -39,6 +39,7 @@ packages = ["src/science_ai"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = ["src"]
 testpaths = ["tests"]
 
 [tool.ruff]
