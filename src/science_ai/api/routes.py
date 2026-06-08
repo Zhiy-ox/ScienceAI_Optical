@@ -14,7 +14,6 @@ from science_ai.api.schemas import (
     CostDetail,
     DetailedCostReport,
     HealthResponse,
-    PipelineProgress,
     ProviderTestResult,
     ResearchResult,
     ResumeRequest,
@@ -48,6 +47,12 @@ _monitor = PipelineMonitor()
 # Shared GraphRunner singleton (lazy-initialized, long-lived).
 _graph_runner: Any = None
 
+# Durable session registry (Postgres). Source of truth for session metadata and
+# final results; survives restarts and is queryable for the /sessions list. The
+# in-memory _sessions dict above is a live overlay for active-run liveness
+# (HITL interrupt payloads, streaming status) that the registry does not track.
+_session_repo = SessionRepository(async_session_factory)
+
 
 async def _get_graph_runner():
     """Return or create the shared GraphRunner with its checkpointer."""
@@ -61,6 +66,23 @@ async def _get_graph_runner():
     checkpointer = await get_checkpointer()
     _graph_runner = GraphRunner(checkpointer=checkpointer)
     return _graph_runner
+
+
+async def _persist_status(session_id: str, status: str) -> None:
+    """Best-effort status write to the durable registry (never raises)."""
+    try:
+        await _session_repo.update_status(session_id, status)
+    except Exception:
+        logger.warning("Could not persist status=%s for %s", status, session_id, exc_info=True)
+
+
+async def _persist_result(session_id: str, result: dict, tracker: CostTracker | None) -> None:
+    """Best-effort final-result write to the durable registry (never raises)."""
+    records = tracker.all_records_for_session(session_id) if tracker else []
+    try:
+        await _session_repo.update_result(session_id, result, records)
+    except Exception:
+        logger.warning("Could not persist result for %s", session_id, exc_info=True)
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -93,6 +115,13 @@ async def start_research(
         "result": None,
     }
     _cost_trackers[session_id] = CostTracker()
+
+    # Persist to the durable registry so the session is queryable across
+    # restarts. Best-effort: a missing/unreachable DB must not block a run.
+    try:
+        await _session_repo.create_session(session_id, request.question, request.phase)
+    except Exception:
+        logger.warning("Could not persist session %s to registry", session_id, exc_info=True)
 
     if not deferred:
         background_tasks.add_task(
@@ -156,6 +185,17 @@ async def _graph_session_status(session_id: str) -> SessionStatus:
     runner = await _get_graph_runner()
     state = await runner.get_state(session_id)
     if not state:
+        # Durable fallback: the persisted registry survives even after the
+        # checkpoint is pruned, and is the source of truth when no live graph
+        # state exists.
+        persisted = await _session_repo.get_session(session_id)
+        if persisted:
+            tracker = _cost_trackers.get(session_id)
+            cost = tracker.session_total(session_id) if tracker else 0.0
+            return SessionStatus(
+                session_id=session_id, status=persisted.status,
+                cost_so_far=round(cost, 4),
+            )
         if in_memory:
             return SessionStatus(
                 session_id=session_id, status=in_memory.get("status", "unknown"),
@@ -179,7 +219,6 @@ async def get_session_results(session_id: str):
     if cfg.orchestrator_mode == "graph":
         return await _graph_session_results(session_id)
 
-    session = _sessions.get(session_id)
     session = await _session_repo.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -203,6 +242,16 @@ async def _graph_session_results(session_id: str) -> ResearchResult:
     runner = await _get_graph_runner()
     state = await runner.get_state(session_id)
     if not state:
+        # Durable fallback to the persisted registry (survives restarts / pruned
+        # checkpoints).
+        persisted = await _session_repo.get_session(session_id)
+        if persisted:
+            if persisted.status == "running":
+                raise HTTPException(status_code=202, detail="Pipeline still running")
+            result = persisted.result or {}
+            if not result:
+                raise HTTPException(status_code=500, detail="Pipeline failed with no result")
+            return _result_from_dict(session_id, result)
         if in_memory and in_memory.get("result"):
             return _result_from_dict(session_id, in_memory["result"])
         raise HTTPException(status_code=404, detail="Session not found")
@@ -353,12 +402,14 @@ async def _consume_graph_stream(session_id, session, tracker, runner, stream_ite
             session["result"] = state
         session["status"] = "completed"
         session["interrupt"] = None
+        await _persist_result(session_id, session.get("result") or {}, tracker)
         cost = tracker.session_total(session_id)
         yield _sse("done", {"status": "completed", "cost_so_far": round(cost, 4)})
     except Exception as e:
         logger.exception("Stream failed for session %s", session_id)
         session["status"] = "failed"
         session["result"] = {"status": "failed"}
+        await _persist_status(session_id, "failed")
         yield _sse("error", {"message": str(e)})
 
 
@@ -632,11 +683,12 @@ async def test_settings():
 
 @router.get("/sessions", response_model=list[SessionListItem])
 async def list_sessions():
-    """List all research sessions (in-memory registry)."""
+    """List all research sessions from the durable registry."""
+    sessions = await _session_repo.list_sessions()
     items = []
-    for sid, sess in _sessions.items():
-        tracker = _cost_trackers.get(sid)
-        cost = tracker.session_total(sid) if tracker else 0.0
+    for sess in sessions:
+        tracker = _cost_trackers.get(sess.session_id)
+        cost = tracker.session_total(sess.session_id) if tracker else 0.0
         items.append(SessionListItem(
             session_id=sess.session_id,
             status=sess.status,
@@ -706,13 +758,16 @@ async def _run_pipeline(
             if pending is not None:
                 _sessions[session_id]["status"] = "awaiting_input"
                 _sessions[session_id]["interrupt"] = pending
+                await _persist_status(session_id, "awaiting_input")
             else:
                 _sessions[session_id]["result"] = result
                 _sessions[session_id]["status"] = "completed"
+                await _persist_result(session_id, result, tracker)
         except Exception:
             logger.exception("Graph pipeline failed for session %s", session_id)
             _sessions[session_id]["status"] = "failed"
             _sessions[session_id]["result"] = {"status": "failed"}
+            await _persist_status(session_id, "failed")
         return
 
     # ---- Legacy sequential orchestrator ----
@@ -763,9 +818,7 @@ async def _run_pipeline(
                 max_papers_to_read=max_papers,
                 source=source,
             )
-        await _session_repo.update_result(
-            session_id, result, tracker.all_records_for_session(session_id)
-        )
+        await _persist_result(session_id, result, tracker)
     except Exception:
         logger.exception("Pipeline failed for session %s", session_id)
-        await _session_repo.update_status(session_id, "failed")
+        await _persist_status(session_id, "failed")

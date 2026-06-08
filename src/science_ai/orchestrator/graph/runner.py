@@ -43,7 +43,7 @@ class GraphRunner:
             self.llm = CLILLMClient(
                 cost_tracker=CostTracker(),
                 codex_cmd=settings.cli_codex_command,
-                gemini_cmd=settings.cli_gemini_command,
+                antigravity_cmd=settings.cli_antigravity_command,
                 claude_cmd=settings.cli_claude_command,
                 timeout=settings.cli_timeout_seconds,
             )
