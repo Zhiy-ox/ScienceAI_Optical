@@ -19,9 +19,6 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://scienceai:scienceai@localhost:5432/scienceai"
 
-    # Redis
-    redis_url: str = "redis://localhost:6379/0"
-
     # Qdrant
     qdrant_url: str = "http://localhost:6333"
 
@@ -40,10 +37,6 @@ class Settings(BaseSettings):
     cli_antigravity_command: str = "agy"
     cli_claude_command: str = "claude"
     cli_timeout_seconds: int = 240
-
-    # Orchestrator mode: "graph" (LangGraph, default) or "legacy" (deprecated
-    # sequential orchestrator, kept as a fallback during the cutover soak period)
-    orchestrator_mode: str = "graph"
 
     # Graph checkpointer DSN (psycopg v3 format).
     # Empty string = use in-memory MemorySaver (no durability).

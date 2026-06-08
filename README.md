@@ -4,11 +4,12 @@ AI-driven research assistant that automates literature review, gap detection, an
 
 ## Features
 
+- **LangGraph orchestration** — the pipeline is a `StateGraph` with parallel fan-out, bounded feedback loops, durable checkpointing, and human-in-the-loop approval gates
 - **Multi-model orchestration** — routes tasks to GPT-5.4, Gemini 3.1 Pro, and Claude Opus/Sonnet 4.6 based on capability fit
 - **Dual LLM backend** — paid API mode (via litellm) or free CLI mode (local CLI tools)
 - **8 specialized agents** — query planning, paper triage, deep reading, critique, gap detection, verification, idea generation, experiment planning
 - **Feedback loops** — downstream results can correct upstream decisions (search refinement, gap re-verification, idea feasibility checks)
-- **Knowledge storage** — PostgreSQL, Qdrant vector index, Redis session memory
+- **Knowledge storage** — PostgreSQL (durable checkpointer + session registry) and a Qdrant vector index
 - **Zotero integration** — import/export papers from your Zotero library
 - **Web dashboard** — Next.js app with liquid glass UI at `localhost:3000`
 
@@ -16,7 +17,7 @@ AI-driven research assistant that automates literature review, gap detection, an
 
 - Python 3.11+
 - Node.js 18+ and npm
-- Docker Desktop (for PostgreSQL, Redis, Qdrant)
+- Docker Desktop (for PostgreSQL and Qdrant)
 
 ## Quick Start
 
