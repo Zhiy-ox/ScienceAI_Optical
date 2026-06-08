@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from science_ai.api.routes import router
+from science_ai.config import settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,6 +32,12 @@ async def lifespan(app: FastAPI):
         await close_checkpointer()
     except Exception:
         pass
+    # Dispose the shared Qdrant vector store connection, if one was opened.
+    try:
+        from science_ai.api.routes import close_vector_resources
+        await close_vector_resources()
+    except Exception:
+        pass
     # Dispose the database engine / connection pool.
     try:
         await close_db()
@@ -47,7 +54,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=settings.cors_origin_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

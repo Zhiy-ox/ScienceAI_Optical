@@ -20,6 +20,7 @@ from science_ai.orchestrator.feedback import (
     verification_pass_ratio,
 )
 from science_ai.orchestrator.graph.deps import get_deps
+from science_ai.orchestrator.graph.ids import assign_sequential_ids, stamp_linked_id
 from science_ai.orchestrator.graph.state import ResearchState
 
 logger = logging.getLogger(__name__)
@@ -462,6 +463,10 @@ async def gap_detect_node(state: ResearchState, config: RunnableConfig) -> dict[
 
     gaps = await gap_detector.run(**run_kwargs)
 
+    # Stamp canonical IDs so verification / ideation can reference gaps reliably,
+    # regardless of the placeholder IDs the LLM emits.
+    gaps = assign_sequential_ids(gaps, "GAP")
+
     emit_progress("gap_detect", f"Found {len(gaps)} candidate gaps", count=len(gaps))
     logger.info("[graph] gap_detect_node: %d gaps", len(gaps))
     return {"gaps": gaps, "status": "gaps_detected"}
@@ -484,6 +489,14 @@ async def verify_node(state: ResearchState, config: RunnableConfig) -> dict[str,
         deps.llm, session_id=sid, search_service=deps.search,
     )
     verification_results = await verifier.run(gaps=gaps)
+
+    # The verifier returns one result per gap in order; re-stamp the canonical
+    # gap_id and carry the gap's description so verified_gaps stay linkable to
+    # their source gap during ideation (the LLM's own gap_id is unreliable).
+    for gap, result in zip(gaps, verification_results):
+        if isinstance(result, dict):
+            stamp_linked_id(result, gap, "gap_id")
+            result.setdefault("description", gap.get("description", ""))
 
     verified_gaps = [
         v for v in verification_results if v.get("status") == "verified_gap"
@@ -534,6 +547,9 @@ async def idea_node(state: ResearchState, config: RunnableConfig) -> dict[str, A
         user_background=user_background,
     )
 
+    # Stamp canonical idea IDs so experiment plans can reference them reliably.
+    ideas = assign_sequential_ids(ideas, "IDEA")
+
     emit_progress("idea", f"Generated {len(ideas)} research ideas", count=len(ideas))
     logger.info("[graph] idea_node: %d ideas", len(ideas))
     return {"ideas": ideas, "status": "ideas_generated"}
@@ -561,6 +577,9 @@ async def experiment_node(state: ResearchState, config: RunnableConfig) -> dict[
             plan = await exp_planner.run(
                 idea=idea, knowledge_objects=knowledge_objects,
             )
+            # Link the plan back to its source idea's canonical ID.
+            if isinstance(plan, dict):
+                stamp_linked_id(plan, idea, "idea_id")
             experiment_plans.append(plan)
         except Exception:
             logger.exception("Failed to plan experiment for idea '%s'", idea.get("title", ""))

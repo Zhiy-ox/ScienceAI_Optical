@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -47,6 +48,11 @@ _monitor = PipelineMonitor()
 # Shared GraphRunner singleton (lazy-initialized, long-lived).
 _graph_runner: Any = None
 
+# Shared, lazily-connected semantic-search resources (Qdrant + embeddings).
+_vector_store: Any = None
+_embedding_service: Any = None
+_vector_lock = asyncio.Lock()
+
 # Durable session registry (Postgres). Source of truth for session metadata and
 # final results; survives restarts and is queryable for the /sessions list. The
 # in-memory _sessions dict above is a live overlay for active-run liveness
@@ -66,6 +72,52 @@ async def _get_graph_runner():
     checkpointer = await get_checkpointer()
     _graph_runner = GraphRunner(checkpointer=checkpointer)
     return _graph_runner
+
+
+async def _get_vector_resources(cfg):
+    """Lazily build a shared, connected Qdrant store + async embedding fn.
+
+    Returns ``(vector_store, embedding_fn)`` when both Qdrant and an OpenAI key
+    are configured and the connection succeeds; otherwise ``(None, None)`` — the
+    graph then runs without semantic indexing (the index_node and gap detector
+    treat these as optional). Built once and reused across sessions.
+    """
+    global _vector_store, _embedding_service
+    if not (cfg.qdrant_url and cfg.openai_api_key):
+        return None, None
+    if _vector_store is not None:
+        return _vector_store, _embedding_service.embed_single
+
+    async with _vector_lock:
+        if _vector_store is None:
+            try:
+                from science_ai.services.embedding import EmbeddingService
+                from science_ai.storage.vector_store import VectorStore
+
+                vs = VectorStore()
+                await vs.connect()
+                _vector_store = vs
+                _embedding_service = EmbeddingService()
+                logger.info("Connected Qdrant vector store for semantic indexing")
+            except Exception:
+                logger.warning(
+                    "Vector store unavailable; continuing without semantic indexing",
+                    exc_info=True,
+                )
+                return None, None
+    return _vector_store, _embedding_service.embed_single
+
+
+async def close_vector_resources() -> None:
+    """Dispose the shared vector store connection (called on shutdown)."""
+    global _vector_store, _embedding_service
+    if _vector_store is not None:
+        try:
+            await _vector_store.close()
+        except Exception:
+            logger.warning("Error closing vector store", exc_info=True)
+    _vector_store = None
+    _embedding_service = None
 
 
 async def _persist_status(session_id: str, status: str) -> None:
@@ -277,6 +329,39 @@ def _result_from_dict(session_id: str, result: dict) -> ResearchResult:
     )
 
 
+@router.get("/research/{session_id}/trace")
+async def get_session_trace(session_id: str):
+    """Per-node execution trace (timing) for a research session.
+
+    Reads the checkpointed ``node_metrics`` written by the timing wrapper around
+    each graph node. Returns one record per node execution plus a roll-up of
+    total/aggregate durations — useful for spotting slow stages and verifying
+    fan-out parallelism.
+    """
+    runner = await _get_graph_runner()
+    state = await runner.get_state(session_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    metrics: list[dict] = state.get("node_metrics", []) or []
+
+    by_node: dict[str, dict] = {}
+    for m in metrics:
+        name = m.get("node", "?")
+        agg = by_node.setdefault(name, {"node": name, "calls": 0, "total_s": 0.0})
+        agg["calls"] += 1
+        agg["total_s"] = round(agg["total_s"] + m.get("duration_s", 0.0), 4)
+
+    return {
+        "session_id": session_id,
+        "status": state.get("status", "unknown"),
+        "node_count": len(metrics),
+        "total_duration_s": round(sum(m.get("duration_s", 0.0) for m in metrics), 4),
+        "by_node": sorted(by_node.values(), key=lambda a: a["total_s"], reverse=True),
+        "trace": metrics,
+    }
+
+
 @router.get("/research/{session_id}/cost", response_model=DetailedCostReport)
 async def get_session_cost(session_id: str):
     """Get detailed cost report for a research session."""
@@ -339,12 +424,25 @@ async def get_session_cost(session_id: str):
     )
 
 
-def _build_session_resources(phase: int, source: str, cfg) -> tuple[Any, Any]:
-    """Build per-session graph store and Zotero client (shared by run + stream)."""
+async def _build_session_resources(
+    phase: int, source: str, cfg
+) -> tuple[Any, Any, Any, Any]:
+    """Build per-session resources shared by run + stream + resume.
+
+    Returns ``(graph_store, zotero_client, vector_store, embedding_fn)``. The
+    graph store (Phase 3) and semantic-search resources (Phase 2+, when Qdrant +
+    an OpenAI key are configured) are optional; absent ones are ``None`` and the
+    pipeline degrades gracefully.
+    """
     graph_store = None
     if phase >= 3:
         from science_ai.storage.graph_store import InMemoryGraphStore
         graph_store = InMemoryGraphStore()
+
+    # Semantic indexing + embedding-based gap similarity kick in from Phase 2.
+    vector_store, embedding_fn = (None, None)
+    if phase >= 2:
+        vector_store, embedding_fn = await _get_vector_resources(cfg)
 
     zotero_client = None
     if source in ("zotero", "both") and cfg.zotero_library_id and cfg.zotero_api_key:
@@ -354,7 +452,7 @@ def _build_session_resources(phase: int, source: str, cfg) -> tuple[Any, Any]:
             api_key=cfg.zotero_api_key,
             library_type=cfg.zotero_library_type,
         )
-    return graph_store, zotero_client
+    return graph_store, zotero_client, vector_store, embedding_fn
 
 
 def _sse(event: str, data: dict) -> str:
@@ -455,8 +553,10 @@ async def stream_research(session_id: str):
 
         runner = await _get_graph_runner()
         tracker = _cost_trackers.setdefault(session_id, CostTracker())
-        graph_store, zotero_client = _build_session_resources(
-            session["phase"], session.get("source", "web"), cfg,
+        graph_store, zotero_client, vector_store, embedding_fn = (
+            await _build_session_resources(
+                session["phase"], session.get("source", "web"), cfg,
+            )
         )
         session["status"] = "running"
 
@@ -470,6 +570,8 @@ async def stream_research(session_id: str):
             source=session.get("source", "web"),
             cost_tracker=tracker,
             graph_store=graph_store,
+            vector_store=vector_store,
+            embedding_fn=embedding_fn,
             zotero_client=zotero_client,
             hitl_gates=session.get("hitl_gates", []),
         )
@@ -505,8 +607,10 @@ async def resume_research(session_id: str, body: ResumeRequest):
     async def event_gen():
         runner = await _get_graph_runner()
         tracker = _cost_trackers.setdefault(session_id, CostTracker())
-        graph_store, zotero_client = _build_session_resources(
-            session["phase"], session.get("source", "web"), cfg,
+        graph_store, zotero_client, vector_store, embedding_fn = (
+            await _build_session_resources(
+                session["phase"], session.get("source", "web"), cfg,
+            )
         )
         session["status"] = "running"
         session["interrupt"] = None
@@ -516,6 +620,8 @@ async def resume_research(session_id: str, body: ResumeRequest):
             session_id, decision,
             cost_tracker=tracker,
             graph_store=graph_store,
+            vector_store=vector_store,
+            embedding_fn=embedding_fn,
             zotero_client=zotero_client,
         )
         async for frame in _consume_graph_stream(
@@ -748,7 +854,9 @@ async def _run_pipeline(
     if cfg.orchestrator_mode == "graph":
         try:
             runner = await _get_graph_runner()
-            graph_store, zotero_client = _build_session_resources(phase, source, cfg)
+            graph_store, zotero_client, vector_store, embedding_fn = (
+                await _build_session_resources(phase, source, cfg)
+            )
             hitl_gates = _sessions.get(session_id, {}).get("hitl_gates", [])
 
             result = await runner.run(
@@ -760,6 +868,8 @@ async def _run_pipeline(
                 source=source,
                 cost_tracker=tracker,
                 graph_store=graph_store,
+                vector_store=vector_store,
+                embedding_fn=embedding_fn,
                 zotero_client=zotero_client,
                 hitl_gates=hitl_gates,
             )

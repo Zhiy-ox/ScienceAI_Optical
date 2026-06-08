@@ -58,6 +58,16 @@ class Settings(BaseSettings):
     # Cost budget (USD) — pipeline stops if exceeded
     cost_budget_usd: float = Field(default=10.0)
 
+    # Comma-separated list of allowed CORS origins for the dashboard. Override in
+    # production with the deployed dashboard URL(s), e.g.
+    # "https://app.example.com,https://www.example.com".
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """The configured CORS origins as a clean list."""
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
 
 # ---------------------------------------------------------------------------
 # Model registry: maps model IDs to their pricing and capabilities
