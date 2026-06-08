@@ -32,17 +32,19 @@ class FakePaper:
 
 
 class FakeSearch:
-    """Returns two unique, never-before-seen papers on every call.
+    """Returns ``papers_per_call`` unique, never-before-seen papers per call.
 
     Distinct papers per call are what let Feedback Loop 1 (search refinement)
-    discover new material and cycle.
+    discover new material and cycle. A larger ``papers_per_call`` is used to
+    exercise the parallel fan-out concurrency cap.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, papers_per_call: int = 2) -> None:
         self._counter = itertools.count()
+        self._papers_per_call = papers_per_call
 
     async def search(self, query, **kwargs):
-        return [FakePaper(f"p{next(self._counter)}") for _ in range(2)]
+        return [FakePaper(f"p{next(self._counter)}") for _ in range(self._papers_per_call)]
 
 
 # --------------------------------------------------------------------------
@@ -201,6 +203,14 @@ def install_agents(monkeypatch):
 def fake_search():
     """A fresh FakeSearch per test (two new papers per call)."""
     return FakeSearch()
+
+
+@pytest.fixture
+def make_search():
+    """Factory for FakeSearch with a custom papers-per-call count."""
+    def _make(papers_per_call: int = 2) -> FakeSearch:
+        return FakeSearch(papers_per_call=papers_per_call)
+    return _make
 
 
 @pytest.fixture

@@ -373,13 +373,17 @@ async def _consume_graph_stream(session_id, session, tracker, runner, stream_ite
     """Consume a runner stream/resume iterator and yield SSE frames.
 
     Detects HITL interrupts: when the graph pauses, emits an ``interrupt``
-    event carrying the gate payload and stops (the graph is checkpointed and
-    awaits ``/resume``). Otherwise finalizes the session on completion.
+    event carrying the gate payload. The underlying graph iterator is then
+    drained to its natural end rather than abandoned — with an async
+    checkpointer (Postgres), abandoning the generator early cancels the
+    interrupt checkpoint write, which would break the subsequent ``/resume``.
     """
+    interrupted = False
     try:
         async for mode, chunk in stream_iter:
             if mode == "custom":
-                yield _sse("progress", chunk)
+                if not interrupted:
+                    yield _sse("progress", chunk)
             elif mode == "updates":
                 if isinstance(chunk, dict) and "__interrupt__" in chunk:
                     intr = chunk["__interrupt__"]
@@ -389,11 +393,18 @@ async def _consume_graph_stream(session_id, session, tracker, runner, stream_ite
                         payload = {}
                     session["status"] = "awaiting_input"
                     session["interrupt"] = payload
+                    interrupted = True
                     yield _sse("interrupt", payload)
-                    return
-                for node, upd in chunk.items():
-                    status = upd.get("status") if isinstance(upd, dict) else None
-                    yield _sse("node", {"node": node, "status": status})
+                    # Keep draining so the checkpoint flushes; do not return.
+                    continue
+                if not interrupted:
+                    for node, upd in chunk.items():
+                        status = upd.get("status") if isinstance(upd, dict) else None
+                        yield _sse("node", {"node": node, "status": status})
+
+        if interrupted:
+            await _persist_status(session_id, "awaiting_input")
+            return
 
         # No interrupt — the graph ran to completion.
         state = await runner.get_state(session_id)

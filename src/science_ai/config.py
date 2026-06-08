@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     # to enable durable resume across server restarts.
     checkpointer_dsn: str = ""
 
+    # Max concurrent agent calls within a parallel fan-out stage (deep read,
+    # critique). Caps load on the LLM backend; tune per deployment.
+    fanout_concurrency: int = 5
+
     # Cost budget (USD) — pipeline stops if exceeded
     cost_budget_usd: float = Field(default=10.0)
 

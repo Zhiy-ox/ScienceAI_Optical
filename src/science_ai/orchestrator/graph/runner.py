@@ -7,6 +7,7 @@ service, and checkpointer are shared across sessions; per-session resources
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -34,10 +35,15 @@ class GraphRunner:
         checkpointer: Any = None,
         search_service: PaperSearchService | None = None,
         llm_backend: str | None = None,
+        fanout_concurrency: int | None = None,
     ) -> None:
         from science_ai.config import settings
 
         backend = llm_backend or settings.llm_backend
+        self._fanout_concurrency = (
+            fanout_concurrency if fanout_concurrency is not None
+            else settings.fanout_concurrency
+        )
         if backend == "cli":
             from science_ai.services.cli_llm_client import CLILLMClient
             self.llm = CLILLMClient(
@@ -74,6 +80,7 @@ class GraphRunner:
             graph_store=graph_store,
             embedding_fn=embedding_fn,
             zotero_client=zotero_client,
+            fanout_semaphore=asyncio.Semaphore(self._fanout_concurrency),
         )
 
     async def run(

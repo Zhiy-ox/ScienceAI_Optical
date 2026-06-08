@@ -35,6 +35,9 @@ dev = [
     "pytest-httpx>=0.30.0",
     "ruff>=0.6.0",
     "aiosqlite>=0.20.0",
+    # File-backed checkpointer used by the durability tests to exercise the
+    # same saver contract as the production AsyncPostgresSaver, on disk.
+    "langgraph-checkpoint-sqlite>=2.0",
 ]
 
 [tool.hatch.build.targets.wheel]
