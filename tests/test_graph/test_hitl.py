@@ -101,13 +101,9 @@ async def test_plan_gate_interrupts_then_resumes(monkeypatch):
     assert pending is not None
     assert pending["type"] == "approve_plan"
 
-    # Resume with approval — should now run to completion (no papers read yet).
-    final_status = None
-    async for mode, chunk in runner.resume(sid, {"action": "approve"}):
-        if mode == "updates" and isinstance(chunk, dict):
-            for upd in chunk.values():
-                if isinstance(upd, dict) and upd.get("status"):
-                    final_status = upd["status"]
+    # Resume with approval — drain the stream to drive the graph to completion.
+    async for _mode, _chunk in runner.resume(sid, {"action": "approve"}):
+        pass
 
     state = await runner.get_state(sid)
     assert state is not None

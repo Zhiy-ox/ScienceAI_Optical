@@ -31,6 +31,11 @@ async def lifespan(app: FastAPI):
         await close_checkpointer()
     except Exception:
         pass
+    # Dispose the database engine / connection pool.
+    try:
+        await close_db()
+    except Exception:
+        pass
 
 
 app = FastAPI(
