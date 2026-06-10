@@ -44,10 +44,16 @@ class GraphRunner:
             fanout_concurrency if fanout_concurrency is not None
             else settings.fanout_concurrency
         )
+        # One tracker shared by the LLM client (which records every call into
+        # it) and the per-session summaries. CostTracker keys records by
+        # session_id, so a single instance safely serves all sessions; giving
+        # the client a different tracker than the one summaries are read from
+        # would silently report $0 for every run.
+        self.cost_tracker = CostTracker()
         if backend == "cli":
             from science_ai.services.cli_llm_client import CLILLMClient
             self.llm = CLILLMClient(
-                cost_tracker=CostTracker(),
+                cost_tracker=self.cost_tracker,
                 codex_cmd=settings.cli_codex_command,
                 antigravity_cmd=settings.cli_antigravity_command,
                 claude_cmd=settings.cli_claude_command,
@@ -56,7 +62,7 @@ class GraphRunner:
             logger.info("GraphRunner: CLI backend")
         else:
             from science_ai.services.llm_client import LLMClient
-            self.llm = LLMClient(cost_tracker=CostTracker())
+            self.llm = LLMClient(cost_tracker=self.cost_tracker)
             logger.info("GraphRunner: API backend")
 
         self.search = search_service or PaperSearchService()
@@ -101,7 +107,7 @@ class GraphRunner:
     ) -> dict[str, Any]:
         """Kick off the graph and return the final state as a result dict."""
         session_id = session_id or str(uuid.uuid4())
-        tracker = cost_tracker or CostTracker()
+        tracker = cost_tracker or self.cost_tracker
 
         initial_state = self._make_initial_state(
             question, session_id, phase, max_papers, user_background, source,
@@ -148,7 +154,7 @@ class GraphRunner:
         node-completion updates and human-readable progress emitted by nodes
         via ``get_stream_writer()``.
         """
-        tracker = cost_tracker or CostTracker()
+        tracker = cost_tracker or self.cost_tracker
 
         initial_state = self._make_initial_state(
             question, session_id, phase, max_papers, user_background, source,
@@ -184,7 +190,7 @@ class GraphRunner:
         """
         from langgraph.types import Command
 
-        tracker = cost_tracker or CostTracker()
+        tracker = cost_tracker or self.cost_tracker
         config = self._make_config(
             session_id, tracker,
             graph_store=graph_store, vector_store=vector_store,

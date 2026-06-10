@@ -4,123 +4,76 @@ import { useEffect, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import GlassCard, { StatusBadge } from "@/components/GlassCard";
-import { api, type SessionListItem, type PipelineProgress, type StepProgress } from "@/lib/api";
+import { api, type SessionListItem, type TraceResponse, type NodeMetric } from "@/lib/api";
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-function fmt(ts: number) {
-  return new Date(ts * 1000).toLocaleTimeString();
+const NODE_COLORS: Record<string, string> = {
+  plan: "var(--accent-blue)",
+  search: "var(--accent-blue)",
+  triage: "var(--accent-purple)",
+  select_papers: "var(--accent-purple)",
+  deep_read_one: "var(--accent-purple)",
+  collect_reads: "var(--accent-purple)",
+  index: "var(--accent-teal)",
+  critique_one: "var(--accent-rose)",
+  collect_critiques: "var(--accent-rose)",
+  gap_detect: "var(--accent-rose)",
+  verify: "var(--accent-teal)",
+  idea: "var(--accent-teal)",
+  experiment: "var(--accent-amber)",
+  report: "var(--accent-amber)",
+};
+
+function nodeColor(node: string) {
+  return NODE_COLORS[node] ?? "var(--accent-blue)";
 }
 
-function stepStatusColor(status: StepProgress["status"]) {
-  return status === "done"
-    ? "var(--accent-teal)"
-    : status === "running"
-    ? "var(--accent-blue)"
-    : status === "skipped"
-    ? "var(--accent-amber)"
-    : "var(--accent-rose)"; // failed
-}
+// ── trace row ──────────────────────────────────────────────────────────────
 
-function stepStatusBadgeClass(status: StepProgress["status"]) {
-  return status === "done"
-    ? "badge-completed"
-    : status === "running"
-    ? "badge-running"
-    : status === "skipped"
-    ? "badge-started"
-    : "badge-failed";
-}
-
-// ── step timeline ──────────────────────────────────────────────────────────
-
-function StepRow({ step }: { step: StepProgress }) {
-  const [expanded, setExpanded] = useState(step.status === "failed");
-  const hasError = !!step.error;
+function TraceRow({ metric, index, maxDuration }: {
+  metric: NodeMetric;
+  index: number;
+  maxDuration: number;
+}) {
+  const pct = maxDuration > 0 ? (metric.duration_s / maxDuration) * 100 : 0;
+  const color = nodeColor(metric.node);
 
   return (
-    <div
-      className={`glass-subtle rounded-xl overflow-hidden transition-all ${
-        hasError ? "border border-[var(--accent-rose)]/20" : ""
-      }`}
-    >
-      <button
-        onClick={() => setExpanded((v) => !v)}
-        className="w-full flex items-center gap-4 px-5 py-3 text-left hover:bg-white/[0.03] transition-colors"
-      >
-        {/* step number */}
+    <div className="glass-subtle rounded-xl px-5 py-3">
+      <div className="flex items-center gap-4">
         <span
           className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0"
           style={{
-            background: `${stepStatusColor(step.status)}22`,
-            color: stepStatusColor(step.status),
-            border: `1px solid ${stepStatusColor(step.status)}44`,
+            background: `${color}22`,
+            color,
+            border: `1px solid ${color}44`,
           }}
         >
-          {step.step_number}
+          {index + 1}
         </span>
-
-        {/* name */}
-        <span className="flex-1 text-sm font-medium text-white/80">
-          {step.step_name}
+        <span className="flex-1 text-sm font-mono text-white/80">{metric.node}</span>
+        {metric.status && (
+          <span className="text-[10px] font-mono text-white/30">{metric.status}</span>
+        )}
+        <span className="text-xs font-mono text-white/45 shrink-0 w-16 text-right">
+          {metric.duration_s.toFixed(2)}s
         </span>
-
-        {/* duration */}
-        <span className="text-xs font-mono text-white/35 shrink-0">
-          {step.duration_seconds}s
-        </span>
-
-        {/* badge */}
-        <span className={`glass-badge ${stepStatusBadgeClass(step.status)} shrink-0`}>
-          {step.status}
-        </span>
-
-        {/* expand arrow */}
-        <svg
-          className={`w-4 h-4 text-white/30 shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}
-          fill="none" viewBox="0 0 24 24" stroke="currentColor"
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 9l-7 7-7-7" />
-        </svg>
-      </button>
-
-      {expanded && (
-        <div className="px-5 pb-4 space-y-3 border-t border-white/5">
-          {/* timestamps */}
-          <div className="flex gap-6 pt-3">
-            <div>
-              <p className="text-[10px] text-white/30 uppercase tracking-wider mb-1">Started</p>
-              <p className="text-xs font-mono text-white/50">{fmt(step.started_at)}</p>
-            </div>
-            {step.finished_at && (
-              <div>
-                <p className="text-[10px] text-white/30 uppercase tracking-wider mb-1">Finished</p>
-                <p className="text-xs font-mono text-white/50">{fmt(step.finished_at)}</p>
-              </div>
-            )}
-          </div>
-
-          {/* error */}
-          {step.error && (
-            <div className="rounded-lg p-3" style={{ background: "rgba(255,128,171,0.06)", border: "1px solid rgba(255,128,171,0.15)" }}>
-              <p className="text-[10px] text-[var(--accent-rose)] uppercase tracking-wider mb-1 font-medium">
-                Error
-              </p>
-              <pre className="text-xs font-mono text-[var(--accent-rose)]/80 whitespace-pre-wrap break-all leading-relaxed">
-                {step.error}
-              </pre>
-            </div>
-          )}
-        </div>
-      )}
+      </div>
+      <div className="glass-progress mt-2">
+        <div
+          className="h-full rounded-full transition-all duration-500"
+          style={{ width: `${Math.max(pct, 1)}%`, background: color }}
+        />
+      </div>
     </div>
   );
 }
 
-// ── progress panel ─────────────────────────────────────────────────────────
+// ── trace panel ────────────────────────────────────────────────────────────
 
-function ProgressPanel({ sessionId }: { sessionId: string }) {
-  const [progress, setProgress] = useState<PipelineProgress | null>(null);
+function TracePanel({ sessionId }: { sessionId: string }) {
+  const [trace, setTrace] = useState<TraceResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState("");
 
@@ -128,17 +81,17 @@ function ProgressPanel({ sessionId }: { sessionId: string }) {
     let cancelled = false;
 
     const poll = () => {
-      api.getProgress(sessionId)
-        .then((p) => {
+      api.getTrace(sessionId)
+        .then((t) => {
           if (!cancelled) {
-            setProgress(p);
+            setTrace(t);
             setLoading(false);
             setFetchError("");
           }
         })
         .catch((err) => {
           if (!cancelled) {
-            setFetchError(err.message || "Failed to fetch progress");
+            setFetchError(err.message || "Failed to fetch trace");
             setLoading(false);
           }
         });
@@ -164,84 +117,91 @@ function ProgressPanel({ sessionId }: { sessionId: string }) {
     return (
       <div className="glass-subtle rounded-xl p-4">
         <p className="text-[var(--accent-rose)] text-sm">{fetchError}</p>
+        <p className="text-white/30 text-xs mt-1">
+          Sessions started before this server run may have no checkpointed trace.
+        </p>
       </div>
     );
   }
 
-  if (!progress || progress.steps.length === 0) {
+  if (!trace || trace.node_count === 0) {
     return (
       <div className="glass-subtle rounded-xl p-6 text-center">
-        <p className="text-white/35 text-sm">No steps recorded yet for this session.</p>
+        <p className="text-white/35 text-sm">No node executions recorded yet for this session.</p>
         <p className="text-white/20 text-xs mt-1">The pipeline may not have started.</p>
       </div>
     );
   }
 
-  const failed = progress.steps.filter((s) => s.status === "failed");
-  const done = progress.steps.filter((s) => s.status === "done");
-  const skipped = progress.steps.filter((s) => s.status === "skipped");
-  const running = progress.steps.filter((s) => s.status === "running");
+  const maxDuration = Math.max(...trace.trace.map((m) => m.duration_s), 0);
+  const slowest = trace.by_node[0];
+  const running = trace.status !== "completed" && trace.status !== "failed";
 
   return (
     <div className="space-y-4">
       {/* summary row */}
       <div className="grid grid-cols-4 gap-3">
         {[
-          { label: "Done", count: done.length, color: "var(--accent-teal)" },
-          { label: "Running", count: running.length, color: "var(--accent-blue)" },
-          { label: "Skipped", count: skipped.length, color: "var(--accent-amber)" },
-          { label: "Failed", count: failed.length, color: "var(--accent-rose)" },
-        ].map(({ label, count, color }) => (
+          { label: "Node Runs", value: String(trace.node_count), color: "var(--accent-blue)" },
+          { label: "Total Time", value: `${trace.total_duration_s.toFixed(1)}s`, color: "var(--accent-teal)" },
+          { label: "Slowest Node", value: slowest?.node ?? "—", color: "var(--accent-amber)", mono: true },
+          { label: "Status", value: trace.status, color: "var(--accent-purple)", mono: true },
+        ].map(({ label, value, color, mono }) => (
           <div key={label} className="glass-subtle rounded-xl p-4 text-center">
-            <p className="text-2xl font-bold" style={{ color }}>{count}</p>
+            <p
+              className={`font-bold truncate ${mono ? "text-sm font-mono" : "text-2xl"}`}
+              style={{ color }}
+              title={value}
+            >
+              {value}
+            </p>
             <p className="text-[10px] text-white/35 uppercase tracking-wider mt-1">{label}</p>
           </div>
         ))}
       </div>
 
-      {/* current step banner */}
-      {progress.current_step && (
-        <div
-          className="rounded-xl px-5 py-3 flex items-center gap-3"
-          style={{ background: "rgba(79,195,247,0.07)", border: "1px solid rgba(79,195,247,0.2)" }}
-        >
-          {/* spinner */}
-          <svg className="w-4 h-4 text-[var(--accent-blue)] animate-spin shrink-0" viewBox="0 0 24 24" fill="none">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
-          </svg>
-          <p className="text-sm text-[var(--accent-blue)] font-medium">
-            Step {progress.current_step_number}: {progress.current_step}
-          </p>
-          <span className="ml-auto text-xs font-mono text-white/35">
-            {progress.elapsed_seconds}s elapsed
-          </span>
+      {/* aggregate by node */}
+      <div className="glass-subtle rounded-xl p-5">
+        <p className="text-[10px] text-white/35 uppercase tracking-wider mb-3">Time by node</p>
+        <div className="space-y-3">
+          {trace.by_node.map((agg) => {
+            const pct = trace.total_duration_s > 0
+              ? (agg.total_s / trace.total_duration_s) * 100
+              : 0;
+            return (
+              <div key={agg.node}>
+                <div className="flex justify-between text-xs mb-1">
+                  <span className="text-white/60 font-mono">
+                    {agg.node}
+                    {agg.calls > 1 && <span className="text-white/30"> ×{agg.calls}</span>}
+                  </span>
+                  <span className="text-white/45 font-mono">
+                    {agg.total_s.toFixed(2)}s · {pct.toFixed(0)}%
+                  </span>
+                </div>
+                <div className="glass-progress">
+                  <div
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{ width: `${Math.max(pct, 1)}%`, background: nodeColor(agg.node) }}
+                  />
+                </div>
+              </div>
+            );
+          })}
         </div>
-      )}
+      </div>
 
-      {/* failed steps callout */}
-      {failed.length > 0 && (
-        <div
-          className="rounded-xl px-5 py-3"
-          style={{ background: "rgba(255,128,171,0.06)", border: "1px solid rgba(255,128,171,0.2)" }}
-        >
-          <p className="text-xs text-[var(--accent-rose)] font-medium uppercase tracking-wider mb-1">
-            {failed.length} step{failed.length > 1 ? "s" : ""} failed — expand below for details
-          </p>
-          <p className="text-xs text-white/40">
-            {failed.map((s) => `Step ${s.step_number}: ${s.step_name}`).join(" · ")}
-          </p>
-        </div>
-      )}
-
-      {/* step list */}
+      {/* execution order */}
+      <p className="text-[10px] text-white/35 uppercase tracking-wider px-1">Execution order</p>
       <div className="space-y-2">
-        {progress.steps.map((step) => (
-          <StepRow key={step.step_number} step={step} />
+        {trace.trace.map((m, i) => (
+          <TraceRow key={i} metric={m} index={i} maxDuration={maxDuration} />
         ))}
       </div>
 
-      <p className="text-[10px] text-white/20 text-right">Auto-refreshing every 3s</p>
+      {running && (
+        <p className="text-[10px] text-white/20 text-right">Auto-refreshing every 3s</p>
+      )}
     </div>
   );
 }
@@ -271,9 +231,9 @@ function DebugContent() {
     <div className="space-y-6">
       {/* header */}
       <div>
-        <h2 className="text-2xl font-bold text-white/90">Pipeline Debugger</h2>
+        <h2 className="text-2xl font-bold text-white/90">Pipeline Inspector</h2>
         <p className="text-sm text-white/40 mt-1">
-          Inspect step-by-step progress and error details for any research session.
+          Per-node execution timing for any research session, straight from the graph&apos;s checkpointed trace.
         </p>
       </div>
 
@@ -323,17 +283,17 @@ function DebugContent() {
           )}
         </div>
 
-        {/* progress detail */}
+        {/* trace detail */}
         <div className="md:col-span-2">
           {selectedId ? (
             <div className="space-y-4">
               <div className="flex items-center gap-3">
                 <p className="text-xs text-white/35 uppercase tracking-wider">
-                  Session progress
+                  Node trace
                 </p>
                 <p className="text-xs font-mono text-white/25 truncate">{selectedId}</p>
               </div>
-              <ProgressPanel sessionId={selectedId} />
+              <TracePanel sessionId={selectedId} />
             </div>
           ) : (
             <GlassCard hover={false} className="h-full flex items-center justify-center min-h-[200px]">
@@ -341,7 +301,7 @@ function DebugContent() {
                 <svg className="w-10 h-10 text-white/15 mx-auto mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>
-                <p className="text-white/30 text-sm">Select a session to inspect its pipeline steps.</p>
+                <p className="text-white/30 text-sm">Select a session to inspect its node timings.</p>
               </div>
             </GlassCard>
           )}

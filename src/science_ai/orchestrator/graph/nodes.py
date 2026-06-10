@@ -6,6 +6,7 @@ LangGraph merges back into ResearchState via its reducers.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -415,11 +416,19 @@ async def index_node(state: ResearchState, config: RunnableConfig) -> dict[str, 
     knowledge_objects = state.get("knowledge_objects", [])
 
     if deps.vector_store and deps.embedding_fn:
-        for ko in knowledge_objects:
-            try:
-                await deps.vector_store.index_knowledge_object(ko, deps.embedding_fn)
-            except Exception:
-                logger.exception("Failed to index paper %s", ko.get("paper_id"))
+        # Embedding + upsert per object is independent I/O — run concurrently.
+        results = await asyncio.gather(
+            *(
+                deps.vector_store.index_knowledge_object(ko, deps.embedding_fn)
+                for ko in knowledge_objects
+            ),
+            return_exceptions=True,
+        )
+        for ko, res in zip(knowledge_objects, results):
+            if isinstance(res, BaseException):
+                logger.error(
+                    "Failed to index paper %s", ko.get("paper_id"), exc_info=res,
+                )
 
     if deps.graph_store:
         for ko in knowledge_objects:
@@ -493,10 +502,25 @@ async def verify_node(state: ResearchState, config: RunnableConfig) -> dict[str,
     # The verifier returns one result per gap in order; re-stamp the canonical
     # gap_id and carry the gap's description so verified_gaps stay linkable to
     # their source gap during ideation (the LLM's own gap_id is unreliable).
-    for gap, result in zip(gaps, verification_results):
-        if isinstance(result, dict):
-            stamp_linked_id(result, gap, "gap_id")
-            result.setdefault("description", gap.get("description", ""))
+    # Positional stamping is only safe when the counts line up — if the agent
+    # dropped or added results, re-stamping would mislink every result after
+    # the mismatch, so fall back to matching on the agent-provided gap_id.
+    if len(verification_results) == len(gaps):
+        for gap, result in zip(gaps, verification_results):
+            if isinstance(result, dict):
+                stamp_linked_id(result, gap, "gap_id")
+                result.setdefault("description", gap.get("description", ""))
+    else:
+        logger.warning(
+            "verify_node: %d results for %d gaps — keeping agent-provided gap_ids",
+            len(verification_results), len(gaps),
+        )
+        gaps_by_id = {g.get("gap_id"): g for g in gaps if isinstance(g, dict)}
+        for result in verification_results:
+            if isinstance(result, dict):
+                gap = gaps_by_id.get(result.get("gap_id"))
+                if gap:
+                    result.setdefault("description", gap.get("description", ""))
 
     verified_gaps = [
         v for v in verification_results if v.get("status") == "verified_gap"
@@ -570,19 +594,27 @@ async def experiment_node(state: ResearchState, config: RunnableConfig) -> dict[
     from science_ai.agents.experiment_planner import ExperimentPlanner
 
     exp_planner = ExperimentPlanner(deps.llm, session_id=sid)
-    experiment_plans: list[dict] = []
 
-    for idea in ideas:
-        try:
-            plan = await exp_planner.run(
-                idea=idea, knowledge_objects=knowledge_objects,
-            )
-            # Link the plan back to its source idea's canonical ID.
-            if isinstance(plan, dict):
-                stamp_linked_id(plan, idea, "idea_id")
-            experiment_plans.append(plan)
-        except Exception:
-            logger.exception("Failed to plan experiment for idea '%s'", idea.get("title", ""))
+    # Plans are independent per idea — run them concurrently, bounded by the
+    # same semaphore that limits the deep-read/critique fan-out.
+    async def plan_one(idea: dict) -> dict | None:
+        async with deps.fanout_semaphore:
+            try:
+                plan = await exp_planner.run(
+                    idea=idea, knowledge_objects=knowledge_objects,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to plan experiment for idea '%s'", idea.get("title", ""),
+                )
+                return None
+        # Link the plan back to its source idea's canonical ID.
+        if isinstance(plan, dict):
+            stamp_linked_id(plan, idea, "idea_id")
+        return plan
+
+    results = await asyncio.gather(*(plan_one(idea) for idea in ideas))
+    experiment_plans: list[dict] = [p for p in results if p is not None]
 
     emit_progress("experiment", f"Planned {len(experiment_plans)} experiments")
     logger.info("[graph] experiment_node: %d plans", len(experiment_plans))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -11,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 _checkpointer: Any = None
 _pg_connection: Any = None
+_init_lock = asyncio.Lock()
 
 
 async def get_checkpointer():
@@ -18,11 +20,22 @@ async def get_checkpointer():
 
     Uses AsyncPostgresSaver if ``checkpointer_dsn`` is configured and Postgres
     is reachable; otherwise falls back to MemorySaver (in-memory, non-durable).
+    Initialization is serialized: concurrent first calls (e.g. a results fetch
+    racing a stream open) must not both connect to Postgres — the loser's
+    connection would leak.
     """
     global _checkpointer, _pg_connection
     if _checkpointer is not None:
         return _checkpointer
 
+    async with _init_lock:
+        if _checkpointer is not None:
+            return _checkpointer
+        return await _create_checkpointer()
+
+
+async def _create_checkpointer():
+    global _checkpointer, _pg_connection
     from science_ai.config import settings
 
     dsn = settings.checkpointer_dsn

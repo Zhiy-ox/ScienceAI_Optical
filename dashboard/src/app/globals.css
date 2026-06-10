@@ -45,10 +45,36 @@ body::before {
   inset: 0;
   z-index: -2;
   background:
-    radial-gradient(ellipse 80% 60% at 20% 30%, rgba(79, 195, 247, 0.12) 0%, transparent 60%),
-    radial-gradient(ellipse 60% 80% at 80% 70%, rgba(179, 136, 255, 0.10) 0%, transparent 60%),
-    radial-gradient(ellipse 50% 50% at 50% 50%, rgba(100, 255, 218, 0.06) 0%, transparent 60%);
-  animation: aurora 20s ease-in-out infinite alternate;
+    radial-gradient(ellipse 80% 60% at 20% 30%, rgba(79, 195, 247, 0.08) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 80% at 80% 70%, rgba(179, 136, 255, 0.07) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 50% at 50% 50%, rgba(100, 255, 218, 0.04) 0%, transparent 60%);
+  animation: aurora 30s ease-in-out infinite alternate;
+}
+
+/* Faint dot grid — quiet lab-notebook texture under the glass panels. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -3;
+  background-image: radial-gradient(rgba(232, 236, 244, 0.045) 1px, transparent 1px);
+  background-size: 28px 28px;
+  pointer-events: none;
+}
+
+/* Data reads as data: aligned, tabular digits everywhere numbers appear. */
+.font-mono,
+.stat-value,
+.stat-value-purple,
+.stat-value-amber {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Visible keyboard focus that matches the accent language. */
+:focus-visible {
+  outline: 2px solid rgba(79, 195, 247, 0.6);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 @keyframes aurora {
@@ -208,6 +234,13 @@ body::before {
   border-color: rgba(255, 213, 79, 0.25);
 }
 
+.badge-awaiting {
+  background: rgba(255, 213, 79, 0.15);
+  color: var(--accent-amber);
+  border-color: rgba(255, 213, 79, 0.35);
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
 @keyframes pulse-glow {
   0%, 100% { box-shadow: 0 0 8px rgba(79, 195, 247, 0.1); }
   50% { box-shadow: 0 0 16px rgba(79, 195, 247, 0.25); }
@@ -288,9 +321,9 @@ body::before {
   position: fixed;
   border-radius: 50%;
   filter: blur(80px);
-  opacity: 0.15;
+  opacity: 0.08;
   z-index: -1;
-  animation: float 25s ease-in-out infinite;
+  animation: float 35s ease-in-out infinite;
   pointer-events: none;
 }
 

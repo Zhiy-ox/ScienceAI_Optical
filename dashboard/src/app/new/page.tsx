@@ -6,6 +6,13 @@ import Link from "next/link";
 import GlassCard from "@/components/GlassCard";
 import { api, type ZoteroCollection } from "@/lib/api";
 
+// One-click starting points so a first-time user never faces a blank textarea.
+const EXAMPLE_QUESTIONS = [
+  "What are the latest advances in silicon-based optical phased arrays for LiDAR?",
+  "How can inverse design improve metasurface beam-steering efficiency?",
+  "What limits the field of view of integrated optical phased arrays, and which approaches push past it?",
+];
+
 export default function NewResearchPage() {
   const router = useRouter();
   const [question, setQuestion] = useState("");
@@ -108,6 +115,21 @@ export default function NewResearchPage() {
               onChange={(e) => setQuestion(e.target.value)}
               required
             />
+            {!question.trim() && (
+              <div className="flex flex-wrap gap-2 mt-3">
+                <span className="text-xs text-white/30 self-center">Try:</span>
+                {EXAMPLE_QUESTIONS.map((q) => (
+                  <button
+                    key={q}
+                    type="button"
+                    onClick={() => setQuestion(q)}
+                    className="glass-subtle px-3 py-1.5 text-xs text-white/50 hover:text-white/80 hover:bg-white/[0.06] transition-all cursor-pointer text-left"
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Paper Source */}

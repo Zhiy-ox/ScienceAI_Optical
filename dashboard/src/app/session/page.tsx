@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState, Suspense } from "react";
+import { useEffect, useRef, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import GlassCard, { StatCard, StatusBadge } from "@/components/GlassCard";
 import PipelineProgress, { PIPELINE_STAGES } from "@/components/PipelineProgress";
 import ApprovalCard, { type InterruptPayload } from "@/components/ApprovalCard";
-import { api, type ResearchResult, type StreamEvent } from "@/lib/api";
+import { api, type ResearchResult, type StreamEvent, type TraceResponse } from "@/lib/api";
 
 const STAGE_INDEX: Record<string, number> = Object.fromEntries(
   PIPELINE_STAGES.map((s, i) => [s.key, i])
@@ -26,9 +26,20 @@ function SessionContent() {
   const [completedStages, setCompletedStages] = useState<Set<string>>(new Set());
   const [streaming, setStreaming] = useState(false);
 
+  // Per-node execution trace (lazy-loaded on the Trace tab)
+  const [trace, setTrace] = useState<TraceResponse | null>(null);
+
   // Human-in-the-loop gate
   const [interrupt, setInterrupt] = useState<InterruptPayload | null>(null);
   const [resuming, setResuming] = useState(false);
+
+  // Refs mirror the latest values for the polling interval — reading the state
+  // variables directly from the interval callback would capture the values
+  // from the first render and poll forever after completion.
+  const resultRef = useRef<ResearchResult | null>(null);
+  const streamingRef = useRef(false);
+  resultRef.current = result;
+  streamingRef.current = streaming;
 
   useEffect(() => {
     if (!sessionId) return;
@@ -84,14 +95,27 @@ function SessionContent() {
         setLiveMsg(null);
         setInterrupt({
           type: ev.type,
-          message: ev.msg,
+          message: ev.message ?? ev.msg,
           plan: ev.plan,
           verified_gaps: ev.verified_gaps,
         });
       } else if (ev.event === "done" || ev.event === "error") {
         setStreaming(false);
         setLiveStage(null);
-        fetchResults();
+        if (ev.status === "awaiting_input") {
+          // Reload/restart while paused at a gate: the stream won't replay the
+          // interrupt event, so restore the approval card from /status.
+          api.getStatus(sessionId)
+            .then((s) => {
+              if (!cancelled && s.interrupt) {
+                setLoading(false);
+                setInterrupt(s.interrupt as InterruptPayload);
+              }
+            })
+            .catch(() => fetchResults());
+        } else {
+          fetchResults();
+        }
       }
     };
 
@@ -102,10 +126,11 @@ function SessionContent() {
 
     fetchResults();
 
-    // Auto-refresh polling fallback when not streaming.
+    // Auto-refresh polling fallback when not streaming; stops once terminal.
     const interval = setInterval(() => {
-      if (result?.status === "completed" || result?.status === "failed") return;
-      if (!streaming) fetchResults();
+      const status = resultRef.current?.status;
+      if (status === "completed" || status === "failed") return;
+      if (!streamingRef.current) fetchResults();
     }, 5000);
 
     return () => {
@@ -113,8 +138,13 @@ function SessionContent() {
       clearInterval(interval);
       unsubscribe();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
+
+  // Lazy-load the per-node trace when its tab opens (refresh on result change).
+  useEffect(() => {
+    if (activeTab !== "trace" || !sessionId) return;
+    api.getTrace(sessionId).then(setTrace).catch(() => setTrace(null));
+  }, [activeTab, sessionId, result?.status]);
 
   const handleDecision = async (action: "approve" | "reject") => {
     setResuming(true);
@@ -144,7 +174,7 @@ function SessionContent() {
           setStreaming(false);
           setInterrupt({
             type: ev.type,
-            message: ev.msg,
+            message: ev.message ?? ev.msg,
             plan: ev.plan,
             verified_gaps: ev.verified_gaps,
           });
@@ -252,6 +282,7 @@ function SessionContent() {
     { id: "gaps", label: `Gaps (${result.gaps?.length ?? 0})` },
     { id: "ideas", label: `Ideas (${result.ideas?.length ?? 0})` },
     { id: "report", label: "Report" },
+    { id: "trace", label: "Trace" },
   ];
 
   return (
@@ -395,14 +426,22 @@ function SessionContent() {
         <div className="space-y-3">
           {(result.gaps ?? []).map((gap, i) => {
             const g = gap as Record<string, unknown>;
-            const verified = (result.verified_gaps ?? []).some(
-              (vg) => (vg as Record<string, unknown>).title === g.title
-            );
+            // Canonical gap_id is stamped on both gaps and verification
+            // results; title equality is a fallback for older sessions.
+            const verified = (result.verified_gaps ?? []).some((vg) => {
+              const v = vg as Record<string, unknown>;
+              return g.gap_id ? v.gap_id === g.gap_id : v.title === g.title;
+            });
             return (
               <GlassCard key={i}>
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <p className="text-sm font-medium text-white/80">{g.title as string}</p>
+                    <div className="flex items-center gap-2">
+                      {typeof g.gap_id === "string" && (
+                        <span className="text-[10px] font-mono text-[var(--accent-rose)]">{g.gap_id}</span>
+                      )}
+                      <p className="text-sm font-medium text-white/80">{g.title as string}</p>
+                    </div>
                     <p className="text-xs text-white/35 mt-1">{g.gap_type as string}</p>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
@@ -431,11 +470,23 @@ function SessionContent() {
         <div className="space-y-3">
           {(result.ideas ?? []).map((idea, i) => {
             const d = idea as Record<string, unknown>;
+            // Match the experiment plan by its stamped idea_id; positional
+            // fallback covers older sessions without canonical IDs. Index
+            // pairing alone mislinks when a plan failed mid-list.
+            const plans = (result.experiment_plans ?? []) as Record<string, unknown>[];
+            const plan = d.idea_id
+              ? plans.find((p) => p.idea_id === d.idea_id)
+              : plans[i];
             return (
               <GlassCard key={i}>
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <p className="text-sm font-medium text-white/80">{d.title as string}</p>
+                    <div className="flex items-center gap-2">
+                      {typeof d.idea_id === "string" && (
+                        <span className="text-[10px] font-mono text-[var(--accent-purple)]">{d.idea_id}</span>
+                      )}
+                      <p className="text-sm font-medium text-white/80">{d.title as string}</p>
+                    </div>
                     <p className="text-xs text-white/35 mt-1">Strategy: {d.strategy as string}</p>
                   </div>
                   {typeof d.feasibility_score === "number" && (
@@ -447,11 +498,11 @@ function SessionContent() {
                     </div>
                   )}
                 </div>
-                {result.experiment_plans?.[i] && (
+                {plan && (
                   <div className="mt-4 pt-3 border-t border-white/5">
                     <p className="text-xs text-white/40 uppercase tracking-wider mb-2">Experiment Phases</p>
                     <div className="flex gap-2">
-                      {((result.experiment_plans[i] as Record<string, unknown>).phases as string[] || []).map((ph, j) => (
+                      {(plan.phases as string[] || []).map((ph, j) => (
                         <span key={j} className="glass-badge badge-started text-[10px]">{ph}</span>
                       ))}
                     </div>
@@ -486,6 +537,52 @@ function SessionContent() {
             </div>
           ) : (
             <p className="text-white/40 text-sm">No report generated. Run Phase 3 for a full report.</p>
+          )}
+        </GlassCard>
+      )}
+
+      {activeTab === "trace" && (
+        <GlassCard hover={false}>
+          {trace && trace.node_count > 0 ? (
+            <div className="space-y-6">
+              <div className="flex items-baseline justify-between">
+                <h3 className="text-base font-semibold text-white/80">Per-Node Execution Trace</h3>
+                <span className="text-xs font-mono text-white/40">
+                  {trace.node_count} node runs · {trace.total_duration_s.toFixed(2)}s total
+                </span>
+              </div>
+              <div className="space-y-2">
+                {trace.by_node.map((agg) => {
+                  const pct = trace.total_duration_s > 0
+                    ? (agg.total_s / trace.total_duration_s) * 100
+                    : 0;
+                  return (
+                    <div key={agg.node}>
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-white/60 font-mono">
+                          {agg.node}
+                          {agg.calls > 1 && (
+                            <span className="text-white/30"> ×{agg.calls}</span>
+                          )}
+                        </span>
+                        <span className="text-white/50 font-mono">{agg.total_s.toFixed(2)}s</span>
+                      </div>
+                      <div className="glass-progress">
+                        <div className="glass-progress-fill" style={{ width: `${Math.max(pct, 1)}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="text-[10px] text-white/25">
+                Durations come from the graph&apos;s observability layer; parallel fan-out nodes
+                (deep_read_one, critique_one) overlap in wall-clock time.
+              </p>
+            </div>
+          ) : (
+            <p className="text-white/40 text-sm">
+              No trace recorded yet. Node timings appear here once the pipeline has run.
+            </p>
           )}
         </GlassCard>
       )}
