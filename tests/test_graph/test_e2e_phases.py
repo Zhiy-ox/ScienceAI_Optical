@@ -105,6 +105,63 @@ async def test_phase3_idea_regen_loop_bounded(install_agents, graph_runner):
     assert result["status"] == "completed"
 
 
+class _ConservativeVerifier:
+    """Real-world verifier: marks every gap as already-active (none strictly novel)."""
+
+    def __init__(self, llm, session_id="", search_service=None):
+        pass
+
+    async def run(self, *, gaps, **kwargs):
+        return [{**g, "status": "active_area"} for g in gaps]
+
+
+@pytest.mark.asyncio
+async def test_phase3_falls_back_to_candidate_gaps_when_none_verified(
+    install_agents, graph_runner,
+):
+    """A conservative verifier must not silently kill Phase 3.
+
+    Real verifiers often classify gaps as active/emerging rather than strictly
+    novel, leaving ``verified_gaps`` empty. Ideation should fall back to the
+    strongest candidate gaps so the run still yields ideas and a report.
+    """
+    install_agents(VerificationAgent=_ConservativeVerifier)
+    result = await graph_runner.run(
+        "q", session_id="e2e-p3-fallback", phase=3, max_papers=10,
+    )
+
+    assert result["status"] == "completed"
+    assert len(result["verified_gaps"]) == 0       # verifier strictly verified nothing
+    assert len(result["gaps"]) >= 1                 # but candidate gaps existed
+    assert len(result["ideas"]) >= 1               # …so ideation still ran
+    assert result["report"] is not None
+
+
+class _BrokenReportWriter:
+    """Report writer that always fails — exercises the fallback report path."""
+
+    def __init__(self, llm, session_id=""):
+        pass
+
+    async def run(self, **kwargs):
+        raise RuntimeError("report writer blew up")
+
+
+@pytest.mark.asyncio
+async def test_phase3_report_fallback_when_writer_fails(install_agents, graph_runner):
+    """A failing report writer still yields a structured fallback report."""
+    install_agents(ReportWriter=_BrokenReportWriter)
+    result = await graph_runner.run(
+        "q", session_id="e2e-p3-reportfail", phase=3, max_papers=10,
+    )
+
+    assert result["status"] == "completed"
+    report = result["report"]
+    assert report is not None
+    assert report.get("fallback") is True
+    assert report.get("sections")           # has readable sections
+
+
 @pytest.mark.asyncio
 async def test_phase3_gaps_gate_interrupts_then_resumes(install_agents, graph_runner):
     """The gaps approval gate pauses Phase 3 before ideation, then resumes."""

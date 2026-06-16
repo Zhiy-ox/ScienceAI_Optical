@@ -545,16 +545,50 @@ async def verify_node(state: ResearchState, config: RunnableConfig) -> dict[str,
 # Stage 10: Idea Generation
 # ------------------------------------------------------------------
 
+def _top_candidate_gaps(gaps: list[dict], limit: int = 5) -> list[dict]:
+    """Rank candidate gaps for fallback ideation (highest confidence first)."""
+    impact_rank = {"high": 3, "medium": 2, "low": 1}
+
+    def score(gap: dict) -> float:
+        conf = gap.get("confidence", 0.5)
+        try:
+            conf = float(conf)
+        except (TypeError, ValueError):
+            conf = 0.5
+        impact = impact_rank.get(str(gap.get("potential_impact", "medium")).lower(), 2)
+        return conf * impact
+
+    return sorted(gaps, key=score, reverse=True)[:limit]
+
+
 async def idea_node(state: ResearchState, config: RunnableConfig) -> dict[str, Any]:
     deps = get_deps(config)
     sid = state["session_id"]
     verified_gaps = state.get("verified_gaps", [])
     knowledge_objects = state.get("knowledge_objects", [])
 
-    if not verified_gaps:
-        return {"ideas": [], "status": "no_gaps"}
-
-    emit_progress("idea", f"Generating ideas from {len(verified_gaps)} gaps…")
+    gaps_for_ideation = verified_gaps
+    if not gaps_for_ideation:
+        # The verifier marked nothing as strictly novel — common when related
+        # work already exists (gaps come back "active_area"/"emerging"). Rather
+        # than abandoning Phase 3, ideate on the strongest *candidate* gaps so
+        # the run still yields ideas, experiments, and a report.
+        candidate_gaps = state.get("gaps", [])
+        if not candidate_gaps:
+            logger.info("[graph] idea_node: no gaps at all, skipping ideation")
+            return {"ideas": [], "status": "no_gaps"}
+        gaps_for_ideation = _top_candidate_gaps(candidate_gaps)
+        emit_progress(
+            "idea",
+            f"No strictly-novel gaps; ideating on {len(gaps_for_ideation)} "
+            "top candidates…",
+        )
+        logger.info(
+            "[graph] idea_node: 0 verified gaps → falling back to %d candidates",
+            len(gaps_for_ideation),
+        )
+    else:
+        emit_progress("idea", f"Generating ideas from {len(verified_gaps)} gaps…")
 
     from science_ai.agents.idea_generator import IdeaGenerator
 
@@ -566,7 +600,7 @@ async def idea_node(state: ResearchState, config: RunnableConfig) -> dict[str, A
 
     idea_gen = IdeaGenerator(deps.llm, session_id=sid)
     ideas = await idea_gen.run(
-        verified_gaps=verified_gaps,
+        verified_gaps=gaps_for_ideation,
         knowledge_objects=knowledge_objects,
         user_background=user_background,
     )
@@ -636,6 +670,7 @@ async def report_node(state: ResearchState, config: RunnableConfig) -> dict[str,
     report_writer = ReportWriter(deps.llm, session_id=sid)
     cost_summary = deps.cost_tracker.session_summary(sid)
 
+    report: dict[str, Any] | None = None
     try:
         report = await report_writer.run(
             question=state["question"],
@@ -651,9 +686,73 @@ async def report_node(state: ResearchState, config: RunnableConfig) -> dict[str,
         logger.exception("Failed to generate report")
         report = None
 
+    # Never leave the user empty-handed: if the writer failed or returned an
+    # unusable shape, synthesize a structured report from what the pipeline
+    # already produced.
+    if not isinstance(report, dict) or not report.get("sections"):
+        report = _fallback_report(state, cost_summary)
+        logger.info("[graph] report_node: used fallback report synthesis")
+
     emit_progress("report", "Report complete")
     logger.info("[graph] report_node complete")
     return {"report": report, "status": "report_written"}
+
+
+def _fallback_report(state: ResearchState, cost_summary: dict) -> dict[str, Any]:
+    """Build a minimal, honest report from pipeline state.
+
+    Used when the LLM report writer fails (timeout, malformed JSON) or returns
+    an empty report — so Phase 3 always ends with something readable.
+    """
+    question = state.get("question", "")
+    kos = state.get("knowledge_objects", [])
+    verified_gaps = state.get("verified_gaps", [])
+    gaps = verified_gaps or state.get("gaps", [])
+    ideas = state.get("ideas", [])
+    plans = state.get("experiment_plans", [])
+
+    def _bullets(items: list[dict], *fields: str) -> str:
+        lines = []
+        for it in items:
+            text = next((str(it[f]) for f in fields if it.get(f)), None)
+            if text:
+                lines.append(f"- {text}")
+        return "\n".join(lines) or "_None recorded._"
+
+    sections = [
+        {
+            "heading": "Executive Summary",
+            "content": (
+                f"Analysis of {len(kos)} papers for the question "
+                f"“{question}” produced {len(gaps)} research gap(s), "
+                f"{len(ideas)} idea(s), and {len(plans)} experiment plan(s). "
+                "This summary was assembled directly from pipeline outputs "
+                "because the report writer did not return a full draft."
+            ),
+        },
+        {
+            "heading": "Papers Analyzed",
+            "content": _bullets(kos, "title", "paper_id"),
+        },
+        {
+            "heading": "Research Gaps",
+            "content": _bullets(gaps, "description", "gap_id"),
+        },
+        {
+            "heading": "Research Ideas",
+            "content": _bullets(ideas, "title", "description", "idea_id"),
+        },
+    ]
+    return {
+        "title": f"Research Report: {question}" if question else "Research Report",
+        "sections": sections,
+        "citations": [
+            {"paper_id": ko.get("paper_id"), "title": ko.get("title")}
+            for ko in kos if ko.get("paper_id")
+        ],
+        "cost_summary": cost_summary,
+        "fallback": True,
+    }
 
 
 # ------------------------------------------------------------------

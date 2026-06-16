@@ -477,17 +477,31 @@ function SessionContent() {
             const plan = d.idea_id
               ? plans.find((p) => p.idea_id === d.idea_id)
               : plans[i];
+            const strategy = (d.generation_strategy ?? d.strategy) as string | undefined;
+            const expPlan = (plan?.experiment_plan ?? {}) as Record<string, unknown>;
+            const phase1 = expPlan.phase_1_proof_of_concept as Record<string, unknown> | undefined;
+            const phase2 = expPlan.phase_2_full_evaluation as Record<string, unknown> | undefined;
+            const risks = (expPlan.risks as unknown[] | undefined)?.length ?? 0;
             return (
               <GlassCard key={i}>
                 <div className="flex items-start justify-between gap-4">
-                  <div>
+                  <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       {typeof d.idea_id === "string" && (
                         <span className="text-[10px] font-mono text-[var(--accent-purple)]">{d.idea_id}</span>
                       )}
                       <p className="text-sm font-medium text-white/80">{d.title as string}</p>
                     </div>
-                    <p className="text-xs text-white/35 mt-1">Strategy: {d.strategy as string}</p>
+                    {strategy && (
+                      <p className="text-xs text-white/35 mt-1">
+                        Strategy: {strategy.replace(/_/g, " ")}
+                      </p>
+                    )}
+                    {typeof d.description === "string" && (
+                      <p className="text-xs text-white/50 mt-2 leading-relaxed line-clamp-3">
+                        {d.description as string}
+                      </p>
+                    )}
                   </div>
                   {typeof d.feasibility_score === "number" && (
                     <div className="shrink-0 text-right">
@@ -498,14 +512,24 @@ function SessionContent() {
                     </div>
                   )}
                 </div>
-                {plan && (
-                  <div className="mt-4 pt-3 border-t border-white/5">
-                    <p className="text-xs text-white/40 uppercase tracking-wider mb-2">Experiment Phases</p>
-                    <div className="flex gap-2">
-                      {(plan.phases as string[] || []).map((ph, j) => (
-                        <span key={j} className="glass-badge badge-started text-[10px]">{ph}</span>
-                      ))}
-                    </div>
+                {plan && (phase1 || phase2 || risks > 0) && (
+                  <div className="mt-4 pt-3 border-t border-white/5 space-y-2">
+                    <p className="text-xs text-white/40 uppercase tracking-wider">Experiment Plan</p>
+                    {phase1?.objective != null && (
+                      <p className="text-xs text-white/55">
+                        <span className="text-[var(--accent-teal)]">Phase 1:</span>{" "}
+                        {phase1.objective as string}
+                      </p>
+                    )}
+                    {phase2?.datasets != null && (
+                      <p className="text-xs text-white/45">
+                        <span className="text-[var(--accent-blue)]">Phase 2:</span>{" "}
+                        {(phase2.datasets as string[]).join(", ")}
+                      </p>
+                    )}
+                    {risks > 0 && (
+                      <p className="text-[10px] text-white/30">{risks} risk(s) identified</p>
+                    )}
                   </div>
                 )}
               </GlassCard>

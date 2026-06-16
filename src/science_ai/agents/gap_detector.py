@@ -146,7 +146,7 @@ class GapDetector(BaseAgent):
         ]
 
         result = await self.call_llm_json(messages=messages, max_tokens=8192)
-        gaps = result["parsed"].get("gaps", [])
+        gaps = self.extract_list(result["parsed"], "gaps")
 
         total_precomputed = len(matrix_gaps) + len(assumption_gaps) + len(citation_gaps) + len(eval_gaps)
         logger.info(
