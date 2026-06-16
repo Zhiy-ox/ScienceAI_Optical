@@ -352,8 +352,19 @@ async def get_session_trace(session_id: str):
     """
     runner = await _get_graph_runner()
     state = await runner.get_state(session_id)
+
     if not state:
-        raise HTTPException(status_code=404, detail="Session not found")
+        persisted = await _session_repo.get_session(session_id)
+        if not persisted:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {
+            "session_id": session_id,
+            "status": getattr(persisted, "status", "unknown"),
+            "node_count": 0,
+            "total_duration_s": 0.0,
+            "by_node": [],
+            "trace": [],
+        }
 
     metrics: list[dict] = state.get("node_metrics", []) or []
 

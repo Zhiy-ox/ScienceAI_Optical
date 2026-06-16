@@ -70,11 +70,28 @@ async def test_trace_endpoint_aggregates_by_node():
 
 
 @pytest.mark.asyncio
-async def test_trace_endpoint_404_when_no_state():
+async def test_trace_endpoint_404_when_no_state_and_no_sql_session():
     from fastapi import HTTPException
 
     fake_runner = SimpleNamespace(get_state=AsyncMock(return_value=None))
-    with patch.object(routes, "_get_graph_runner", AsyncMock(return_value=fake_runner)):
+    fake_repo = SimpleNamespace(get_session=AsyncMock(return_value=None))
+    with patch.object(routes, "_get_graph_runner", AsyncMock(return_value=fake_runner)), \
+         patch.object(routes, "_session_repo", fake_repo):
         with pytest.raises(HTTPException) as exc:
             await routes.get_session_trace("missing")
     assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_trace_endpoint_returns_empty_trace_when_no_graph_state():
+    """Session exists in SQL but has no graph checkpoint → empty trace, not 404."""
+    fake_runner = SimpleNamespace(get_state=AsyncMock(return_value=None))
+    fake_session = SimpleNamespace(status="running")
+    fake_repo = SimpleNamespace(get_session=AsyncMock(return_value=fake_session))
+    with patch.object(routes, "_get_graph_runner", AsyncMock(return_value=fake_runner)), \
+         patch.object(routes, "_session_repo", fake_repo):
+        out = await routes.get_session_trace("sql-only")
+    assert out["session_id"] == "sql-only"
+    assert out["status"] == "running"
+    assert out["node_count"] == 0
+    assert out["trace"] == []
