@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -28,8 +29,6 @@ from science_ai.api.schemas import (
 )
 from science_ai.config import MODEL_PRICING
 from science_ai.cost.tracker import CostTracker
-from science_ai.orchestrator.monitor import PipelineMonitor
-from science_ai.orchestrator.orchestrator import ResearchOrchestrator
 from science_ai.storage.database import async_session_factory
 from science_ai.storage.session_repo import SessionRepository
 
@@ -37,15 +36,19 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# In-memory session store — lightweight registry.
-# For graph mode: only tracks question/phase/running status for active sessions;
-# completed session data is read from the checkpointer.
+# In-memory session store — lightweight registry. Only tracks question/phase/
+# running status (and live HITL/stream overlay) for active sessions; completed
+# session data is read from the checkpointer / durable registry.
 _sessions: dict[str, dict] = {}
-_cost_trackers: dict[str, CostTracker] = {}
-_monitor = PipelineMonitor()
 
 # Shared GraphRunner singleton (lazy-initialized, long-lived).
 _graph_runner: Any = None
+_runner_lock = asyncio.Lock()
+
+# Shared, lazily-connected semantic-search resources (Qdrant + embeddings).
+_vector_store: Any = None
+_embedding_service: Any = None
+_vector_lock = asyncio.Lock()
 
 # Durable session registry (Postgres). Source of truth for session metadata and
 # final results; survives restarts and is queryable for the /sessions list. The
@@ -60,12 +63,74 @@ async def _get_graph_runner():
     if _graph_runner is not None:
         return _graph_runner
 
-    from science_ai.orchestrator.graph.checkpointer import get_checkpointer
-    from science_ai.orchestrator.graph.runner import GraphRunner
+    async with _runner_lock:
+        if _graph_runner is not None:
+            return _graph_runner
 
-    checkpointer = await get_checkpointer()
-    _graph_runner = GraphRunner(checkpointer=checkpointer)
-    return _graph_runner
+        from science_ai.orchestrator.graph.checkpointer import get_checkpointer
+        from science_ai.orchestrator.graph.runner import GraphRunner
+
+        checkpointer = await get_checkpointer()
+        _graph_runner = GraphRunner(checkpointer=checkpointer)
+        return _graph_runner
+
+
+def _shared_tracker() -> CostTracker | None:
+    """The runner's cost tracker (where the LLM client records every call).
+
+    Returns None when the runner hasn't been built yet — in that case no run
+    has executed in this process, so there are no in-memory cost records.
+    """
+    return _graph_runner.cost_tracker if _graph_runner is not None else None
+
+
+async def _get_vector_resources(cfg):
+    """Lazily build a shared, connected Qdrant store + async embedding fn.
+
+    Returns ``(vector_store, embedding_fn)`` when both Qdrant and an OpenAI key
+    are configured and the connection succeeds; otherwise ``(None, None)`` — the
+    graph then runs without semantic indexing (the index_node and gap detector
+    treat these as optional). Built once and reused across sessions.
+    """
+    global _vector_store, _embedding_service
+    if not (cfg.qdrant_url and cfg.openai_api_key):
+        return None, None
+    if _vector_store is not None and _embedding_service is not None:
+        return _vector_store, _embedding_service.embed_single
+
+    async with _vector_lock:
+        if _vector_store is None:
+            try:
+                from science_ai.services.embedding import EmbeddingService
+                from science_ai.storage.vector_store import VectorStore
+
+                vs = VectorStore()
+                emb = EmbeddingService()
+                await vs.connect()
+                # Publish only after both succeed, embedding service first, so
+                # a partially-initialized pair can never be observed.
+                _embedding_service = emb
+                _vector_store = vs
+                logger.info("Connected Qdrant vector store for semantic indexing")
+            except Exception:
+                logger.warning(
+                    "Vector store unavailable; continuing without semantic indexing",
+                    exc_info=True,
+                )
+                return None, None
+    return _vector_store, _embedding_service.embed_single
+
+
+async def close_vector_resources() -> None:
+    """Dispose the shared vector store connection (called on shutdown)."""
+    global _vector_store, _embedding_service
+    if _vector_store is not None:
+        try:
+            await _vector_store.close()
+        except Exception:
+            logger.warning("Error closing vector store", exc_info=True)
+    _vector_store = None
+    _embedding_service = None
 
 
 async def _persist_status(session_id: str, status: str) -> None:
@@ -96,12 +161,10 @@ async def start_research(
     background_tasks: BackgroundTasks,
 ):
     """Start a new research session. The pipeline runs in the background."""
-    from science_ai.config import settings as cfg
-
     session_id = str(uuid.uuid4())
 
-    # Defer execution to the SSE endpoint when streaming is requested (graph mode).
-    deferred = request.stream and cfg.orchestrator_mode == "graph"
+    # Defer execution to the SSE endpoint when streaming is requested.
+    deferred = request.stream
 
     _sessions[session_id] = {
         "status": "created" if deferred else "running",
@@ -114,7 +177,6 @@ async def start_research(
         "interrupt": None,
         "result": None,
     }
-    _cost_trackers[session_id] = CostTracker()
 
     # Persist to the durable registry so the session is queryable across
     # restarts. Best-effort: a missing/unreachable DB must not block a run.
@@ -139,25 +201,18 @@ async def start_research(
 
 @router.get("/research/{session_id}/status", response_model=SessionStatus)
 async def get_session_status(session_id: str):
-    """Check the status of a research session."""
-    from science_ai.config import settings as cfg
+    """Check the status of a research session.
 
-    # Graph mode: prefer checkpointer (survives restart), fall back to _sessions.
-    if cfg.orchestrator_mode == "graph":
-        return await _graph_session_status(session_id)
+    Prefers the checkpointer (survives restart), falling back to the in-memory
+    overlay and then the durable registry.
+    """
+    return await _graph_session_status(session_id)
 
-    session = _sessions.get(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
 
-    tracker = _cost_trackers.get(session_id)
+def _cost_so_far(session_id: str) -> float:
+    tracker = _shared_tracker()
     cost = tracker.session_total(session_id) if tracker else 0.0
-
-    return SessionStatus(
-        session_id=session_id,
-        status=session.status,
-        cost_so_far=round(cost, 4),
-    )
+    return round(cost, 4)
 
 
 async def _graph_session_status(session_id: str) -> SessionStatus:
@@ -166,19 +221,16 @@ async def _graph_session_status(session_id: str) -> SessionStatus:
 
     # Paused at a HITL gate — surface the interrupt payload for the approval card.
     if in_memory and in_memory.get("status") == "awaiting_input":
-        tracker = _cost_trackers.get(session_id)
-        cost = tracker.session_total(session_id) if tracker else 0.0
         return SessionStatus(
             session_id=session_id, status="awaiting_input",
-            cost_so_far=round(cost, 4), interrupt=in_memory.get("interrupt"),
+            cost_so_far=_cost_so_far(session_id), interrupt=in_memory.get("interrupt"),
         )
 
     # If the session is still tracked in _sessions as "running", trust that.
     if in_memory and in_memory["status"] == "running":
-        tracker = _cost_trackers.get(session_id)
-        cost = tracker.session_total(session_id) if tracker else 0.0
         return SessionStatus(
-            session_id=session_id, status="running", cost_so_far=round(cost, 4),
+            session_id=session_id, status="running",
+            cost_so_far=_cost_so_far(session_id),
         )
 
     # Read from checkpointer (works even after server restart).
@@ -190,17 +242,26 @@ async def _graph_session_status(session_id: str) -> SessionStatus:
         # state exists.
         persisted = await _session_repo.get_session(session_id)
         if persisted:
-            tracker = _cost_trackers.get(session_id)
-            cost = tracker.session_total(session_id) if tracker else 0.0
             return SessionStatus(
                 session_id=session_id, status=persisted.status,
-                cost_so_far=round(cost, 4),
+                cost_so_far=_cost_so_far(session_id),
             )
         if in_memory:
             return SessionStatus(
                 session_id=session_id, status=in_memory.get("status", "unknown"),
             )
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # A pending interrupt in the checkpoint outlives the in-memory overlay
+    # (e.g. after a server restart): surface it so the approval card comes
+    # back and /resume keeps working.
+    pending = await runner.get_pending_interrupt(session_id)
+    if pending is not None:
+        _remember_awaiting_session(session_id, state, pending)
+        return SessionStatus(
+            session_id=session_id, status="awaiting_input",
+            cost_so_far=_cost_so_far(session_id), interrupt=pending,
+        )
 
     cost = state.get("cost_summary", {}).get("total_usd", 0.0)
     status = state.get("status", "unknown")
@@ -210,27 +271,30 @@ async def _graph_session_status(session_id: str) -> SessionStatus:
     )
 
 
+def _remember_awaiting_session(session_id: str, state: dict, pending: dict) -> None:
+    """Rebuild the in-memory overlay for a checkpointed HITL pause.
+
+    After a restart the _sessions entry is gone but the interrupt lives on in
+    the checkpoint; reconstructing the overlay from checkpointed state lets
+    /resume pick the session up exactly where it paused.
+    """
+    _sessions[session_id] = {
+        "status": "awaiting_input",
+        "question": state.get("question", ""),
+        "phase": state.get("phase", 3),
+        "max_papers": state.get("max_papers", 15),
+        "user_background": state.get("user_background", ""),
+        "source": state.get("source", "web"),
+        "hitl_gates": state.get("hitl_gates", []),
+        "interrupt": pending,
+        "result": None,
+    }
+
+
 @router.get("/research/{session_id}/results", response_model=ResearchResult)
 async def get_session_results(session_id: str):
-    """Get the results of a completed research session."""
-    from science_ai.config import settings as cfg
-
-    # Graph mode: read from checkpointer.
-    if cfg.orchestrator_mode == "graph":
-        return await _graph_session_results(session_id)
-
-    session = await _session_repo.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    if session.status == "running":
-        raise HTTPException(status_code=202, detail="Pipeline still running")
-
-    result = session.result or {}
-    if not result:
-        raise HTTPException(status_code=500, detail="Pipeline failed with no result")
-
-    return _result_from_dict(session_id, result)
+    """Get the results of a completed research session (read from checkpointer)."""
+    return await _graph_session_results(session_id)
 
 
 async def _graph_session_results(session_id: str) -> ResearchResult:
@@ -277,6 +341,50 @@ def _result_from_dict(session_id: str, result: dict) -> ResearchResult:
     )
 
 
+@router.get("/research/{session_id}/trace")
+async def get_session_trace(session_id: str):
+    """Per-node execution trace (timing) for a research session.
+
+    Reads the checkpointed ``node_metrics`` written by the timing wrapper around
+    each graph node. Returns one record per node execution plus a roll-up of
+    total/aggregate durations — useful for spotting slow stages and verifying
+    fan-out parallelism.
+    """
+    runner = await _get_graph_runner()
+    state = await runner.get_state(session_id)
+
+    if not state:
+        persisted = await _session_repo.get_session(session_id)
+        if not persisted:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {
+            "session_id": session_id,
+            "status": getattr(persisted, "status", "unknown"),
+            "node_count": 0,
+            "total_duration_s": 0.0,
+            "by_node": [],
+            "trace": [],
+        }
+
+    metrics: list[dict] = state.get("node_metrics", []) or []
+
+    by_node: dict[str, dict] = {}
+    for m in metrics:
+        name = m.get("node", "?")
+        agg = by_node.setdefault(name, {"node": name, "calls": 0, "total_s": 0.0})
+        agg["calls"] += 1
+        agg["total_s"] = round(agg["total_s"] + m.get("duration_s", 0.0), 4)
+
+    return {
+        "session_id": session_id,
+        "status": state.get("status", "unknown"),
+        "node_count": len(metrics),
+        "total_duration_s": round(sum(m.get("duration_s", 0.0) for m in metrics), 4),
+        "by_node": sorted(by_node.values(), key=lambda a: a["total_s"], reverse=True),
+        "trace": metrics,
+    }
+
+
 @router.get("/research/{session_id}/cost", response_model=DetailedCostReport)
 async def get_session_cost(session_id: str):
     """Get detailed cost report for a research session."""
@@ -284,11 +392,11 @@ async def get_session_cost(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    tracker = _cost_trackers.get(session_id)
+    tracker = _shared_tracker()
+    records = tracker.all_records_for_session(session_id) if tracker else []
 
-    # Fall back to stored cost records when the in-memory tracker is gone (e.g. after restart)
-    if tracker:
-        records = tracker.all_records_for_session(session_id)
+    # Fall back to stored cost records when in-memory records are gone (e.g. after restart)
+    if records:
         summary = tracker.session_summary(session_id)
     elif session.cost_records:
         records = session.cost_records
@@ -339,12 +447,25 @@ async def get_session_cost(session_id: str):
     )
 
 
-def _build_session_resources(phase: int, source: str, cfg) -> tuple[Any, Any]:
-    """Build per-session graph store and Zotero client (shared by run + stream)."""
+async def _build_session_resources(
+    phase: int, source: str, cfg
+) -> tuple[Any, Any, Any, Any]:
+    """Build per-session resources shared by run + stream + resume.
+
+    Returns ``(graph_store, zotero_client, vector_store, embedding_fn)``. The
+    graph store (Phase 3) and semantic-search resources (Phase 2+, when Qdrant +
+    an OpenAI key are configured) are optional; absent ones are ``None`` and the
+    pipeline degrades gracefully.
+    """
     graph_store = None
     if phase >= 3:
         from science_ai.storage.graph_store import InMemoryGraphStore
         graph_store = InMemoryGraphStore()
+
+    # Semantic indexing + embedding-based gap similarity kick in from Phase 2.
+    vector_store, embedding_fn = (None, None)
+    if phase >= 2:
+        vector_store, embedding_fn = await _get_vector_resources(cfg)
 
     zotero_client = None
     if source in ("zotero", "both") and cfg.zotero_library_id and cfg.zotero_api_key:
@@ -354,7 +475,7 @@ def _build_session_resources(phase: int, source: str, cfg) -> tuple[Any, Any]:
             api_key=cfg.zotero_api_key,
             library_type=cfg.zotero_library_type,
         )
-    return graph_store, zotero_client
+    return graph_store, zotero_client, vector_store, embedding_fn
 
 
 def _sse(event: str, data: dict) -> str:
@@ -373,13 +494,17 @@ async def _consume_graph_stream(session_id, session, tracker, runner, stream_ite
     """Consume a runner stream/resume iterator and yield SSE frames.
 
     Detects HITL interrupts: when the graph pauses, emits an ``interrupt``
-    event carrying the gate payload and stops (the graph is checkpointed and
-    awaits ``/resume``). Otherwise finalizes the session on completion.
+    event carrying the gate payload. The underlying graph iterator is then
+    drained to its natural end rather than abandoned — with an async
+    checkpointer (Postgres), abandoning the generator early cancels the
+    interrupt checkpoint write, which would break the subsequent ``/resume``.
     """
+    interrupted = False
     try:
         async for mode, chunk in stream_iter:
             if mode == "custom":
-                yield _sse("progress", chunk)
+                if not interrupted:
+                    yield _sse("progress", chunk)
             elif mode == "updates":
                 if isinstance(chunk, dict) and "__interrupt__" in chunk:
                     intr = chunk["__interrupt__"]
@@ -389,11 +514,18 @@ async def _consume_graph_stream(session_id, session, tracker, runner, stream_ite
                         payload = {}
                     session["status"] = "awaiting_input"
                     session["interrupt"] = payload
+                    interrupted = True
                     yield _sse("interrupt", payload)
-                    return
-                for node, upd in chunk.items():
-                    status = upd.get("status") if isinstance(upd, dict) else None
-                    yield _sse("node", {"node": node, "status": status})
+                    # Keep draining so the checkpoint flushes; do not return.
+                    continue
+                if not interrupted:
+                    for node, upd in chunk.items():
+                        status = upd.get("status") if isinstance(upd, dict) else None
+                        yield _sse("node", {"node": node, "status": status})
+
+        if interrupted:
+            await _persist_status(session_id, "awaiting_input")
+            return
 
         # No interrupt — the graph ran to completion.
         state = await runner.get_state(session_id)
@@ -413,43 +545,31 @@ async def _consume_graph_stream(session_id, session, tracker, runner, stream_ite
         yield _sse("error", {"message": str(e)})
 
 
-@router.get("/research/{session_id}/stream")
-async def stream_research(session_id: str):
-    """Stream live pipeline progress via Server-Sent Events (graph mode).
+async def _launch_session_run(
+    session_id: str, session: dict, *, decision: dict | None = None
+) -> asyncio.Queue:
+    """Start (or resume) a session's graph run as a background task.
 
-    Drives the graph for sessions created with ``stream=true`` and emits:
-      - ``progress`` events: human-readable stage updates from nodes
-      - ``node`` events: a graph node finished (with its status)
-      - ``interrupt`` events: a HITL gate is awaiting approval
-      - ``done`` / ``error``: terminal events
+    The graph is driven by a task that outlives the HTTP connection: SSE frames
+    are pushed onto a queue the endpoint reads from, so a client disconnect
+    (closed tab, dropped network) no longer aborts the pipeline mid-run — the
+    task drains to completion and the client can pick state back up via
+    polling or /status.
     """
     from science_ai.config import settings as cfg
 
-    session = _sessions.get(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    if cfg.orchestrator_mode != "graph":
-        raise HTTPException(
-            status_code=400, detail="Streaming requires graph orchestrator mode"
-        )
-
-    async def event_gen():
-        # Only deferred sessions (created via stream=true) are executed here.
-        # Anything else (already running in the background, or finished) just
-        # reports its status so the client can fall back to polling — this
-        # prevents double-executing a session.
-        if session["status"] != "created":
-            yield _sse("done", {"status": session["status"], "owned": False})
-            return
-
-        runner = await _get_graph_runner()
-        tracker = _cost_trackers.setdefault(session_id, CostTracker())
-        graph_store, zotero_client = _build_session_resources(
+    runner = await _get_graph_runner()
+    tracker = runner.cost_tracker
+    graph_store, zotero_client, vector_store, embedding_fn = (
+        await _build_session_resources(
             session["phase"], session.get("source", "web"), cfg,
         )
-        session["status"] = "running"
+    )
+    session["status"] = "running"
+    session["interrupt"] = None
 
-        yield _sse("progress", {"stage": "start", "msg": "Pipeline starting…"})
+    if decision is None:
+        first_frame = _sse("progress", {"stage": "start", "msg": "Pipeline starting…"})
         stream_iter = runner.stream(
             session["question"],
             session_id=session_id,
@@ -459,12 +579,78 @@ async def stream_research(session_id: str):
             source=session.get("source", "web"),
             cost_tracker=tracker,
             graph_store=graph_store,
+            vector_store=vector_store,
+            embedding_fn=embedding_fn,
             zotero_client=zotero_client,
             hitl_gates=session.get("hitl_gates", []),
         )
-        async for frame in _consume_graph_stream(
-            session_id, session, tracker, runner, stream_iter,
-        ):
+    else:
+        first_frame = _sse(
+            "progress", {"stage": "resume", "msg": f"Resuming ({decision['action']})…"},
+        )
+        stream_iter = runner.resume(
+            session_id, decision,
+            cost_tracker=tracker,
+            graph_store=graph_store,
+            vector_store=vector_store,
+            embedding_fn=embedding_fn,
+            zotero_client=zotero_client,
+        )
+
+    queue: asyncio.Queue = asyncio.Queue()
+    session["queue"] = queue
+
+    async def drive() -> None:
+        queue.put_nowait(first_frame)
+        try:
+            async for frame in _consume_graph_stream(
+                session_id, session, tracker, runner, stream_iter,
+            ):
+                queue.put_nowait(frame)
+        finally:
+            queue.put_nowait(None)  # end-of-stream sentinel
+
+    # Hold a strong reference so the task isn't garbage-collected mid-run.
+    session["task"] = asyncio.create_task(drive())
+    return queue
+
+
+async def _relay_frames(queue: asyncio.Queue):
+    """Yield SSE frames from a session's run queue until the sentinel."""
+    while True:
+        frame = await queue.get()
+        if frame is None:
+            return
+        yield frame
+
+
+@router.get("/research/{session_id}/stream")
+async def stream_research(session_id: str):
+    """Stream live pipeline progress via Server-Sent Events (graph mode).
+
+    Starts the graph for sessions created with ``stream=true`` and emits:
+      - ``progress`` events: human-readable stage updates from nodes
+      - ``node`` events: a graph node finished (with its status)
+      - ``interrupt`` events: a HITL gate is awaiting approval
+      - ``done`` / ``error``: terminal events
+
+    The run itself executes in a background task, so disconnecting mid-stream
+    does not abort it.
+    """
+    session = _sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    async def event_gen():
+        # Only deferred sessions (created via stream=true) are executed here.
+        # Anything else (already running in the background, or finished) just
+        # reports its status so the client can fall back to polling — this
+        # prevents double-executing a session.
+        if session["status"] != "created":
+            yield _sse("done", {"status": session["status"], "owned": False})
+            return
+        queue = await _launch_session_run(session_id, session)
+        async for frame in _relay_frames(queue):
             yield frame
 
     return StreamingResponse(
@@ -475,41 +661,31 @@ async def stream_research(session_id: str):
 @router.post("/research/{session_id}/resume")
 async def resume_research(session_id: str, body: ResumeRequest):
     """Resume an interrupted session at a HITL gate, streaming the continuation."""
-    from science_ai.config import settings as cfg
-
     session = _sessions.get(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    if cfg.orchestrator_mode != "graph":
-        raise HTTPException(status_code=400, detail="Resume requires graph mode")
-    if session.get("status") != "awaiting_input":
+        # The overlay may have been lost to a restart while the interrupt is
+        # still checkpointed; rebuild it from durable state before giving up.
+        runner = await _get_graph_runner()
+        state = await runner.get_state(session_id)
+        if not state:
+            raise HTTPException(status_code=404, detail="Session not found")
+        pending = await runner.get_pending_interrupt(session_id)
+        if pending is None:
+            raise HTTPException(status_code=409, detail="Session is not awaiting input")
+        _remember_awaiting_session(session_id, state, pending)
+        session = _sessions[session_id]
+    elif session.get("status") != "awaiting_input":
         raise HTTPException(status_code=409, detail="Session is not awaiting input")
 
-    decision = {"action": body.action}
+    decision: dict[str, Any] = {"action": body.action}
     if body.plan is not None:
         decision["plan"] = body.plan
     if body.verified_gaps is not None:
         decision["verified_gaps"] = body.verified_gaps
 
     async def event_gen():
-        runner = await _get_graph_runner()
-        tracker = _cost_trackers.setdefault(session_id, CostTracker())
-        graph_store, zotero_client = _build_session_resources(
-            session["phase"], session.get("source", "web"), cfg,
-        )
-        session["status"] = "running"
-        session["interrupt"] = None
-
-        yield _sse("progress", {"stage": "resume", "msg": f"Resuming ({body.action})…"})
-        stream_iter = runner.resume(
-            session_id, decision,
-            cost_tracker=tracker,
-            graph_store=graph_store,
-            zotero_client=zotero_client,
-        )
-        async for frame in _consume_graph_stream(
-            session_id, session, tracker, runner, stream_iter,
-        ):
+        queue = await _launch_session_run(session_id, session, decision=decision)
+        async for frame in _relay_frames(queue):
             yield frame
 
     return StreamingResponse(
@@ -687,13 +863,16 @@ async def list_sessions():
     sessions = await _session_repo.list_sessions()
     items = []
     for sess in sessions:
-        tracker = _cost_trackers.get(sess.session_id)
-        cost = tracker.session_total(sess.session_id) if tracker else 0.0
+        cost = _cost_so_far(sess.session_id)
+        if not cost:
+            # Completed sessions from a previous process: use the persisted total.
+            persisted_summary = (getattr(sess, "result", None) or {}).get("cost_summary") or {}
+            cost = round(persisted_summary.get("total_usd", 0.0), 4)
         items.append(SessionListItem(
             session_id=sess.session_id,
             status=sess.status,
             question=sess.question,
-            cost_so_far=round(cost, 4),
+            cost_so_far=cost,
         ))
     return items
 
@@ -728,97 +907,46 @@ async def _run_pipeline(
     user_background: str = "",
     source: str = "web",
 ) -> None:
-    """Background task that runs the research pipeline."""
+    """Background task that runs the (non-streaming) research pipeline."""
     from science_ai.config import settings as cfg
 
-    tracker = _cost_trackers.get(session_id, CostTracker())
-
-    # ---- Graph-based orchestrator (LangGraph) ----
-    if cfg.orchestrator_mode == "graph":
-        try:
-            runner = await _get_graph_runner()
-            graph_store, zotero_client = _build_session_resources(phase, source, cfg)
-            hitl_gates = _sessions.get(session_id, {}).get("hitl_gates", [])
-
-            result = await runner.run(
-                question=question,
-                session_id=session_id,
-                phase=phase,
-                max_papers=max_papers,
-                user_background=user_background,
-                source=source,
-                cost_tracker=tracker,
-                graph_store=graph_store,
-                zotero_client=zotero_client,
-                hitl_gates=hitl_gates,
-            )
-
-            # If a HITL gate paused the run, surface it for /resume.
-            pending = await runner.get_pending_interrupt(session_id)
-            if pending is not None:
-                _sessions[session_id]["status"] = "awaiting_input"
-                _sessions[session_id]["interrupt"] = pending
-                await _persist_status(session_id, "awaiting_input")
-            else:
-                _sessions[session_id]["result"] = result
-                _sessions[session_id]["status"] = "completed"
-                await _persist_result(session_id, result, tracker)
-        except Exception:
-            logger.exception("Graph pipeline failed for session %s", session_id)
-            _sessions[session_id]["status"] = "failed"
-            _sessions[session_id]["result"] = {"status": "failed"}
-            await _persist_status(session_id, "failed")
-        return
-
-    # ---- Legacy sequential orchestrator ----
-    # Use InMemoryGraphStore for Phase 3 (no Neo4j dependency required)
-    graph_store = None
-    if phase >= 3:
-        from science_ai.storage.graph_store import InMemoryGraphStore
-        graph_store = InMemoryGraphStore()
-
-    # Set up Zotero client if source includes zotero
-    zotero_client = None
-    if source in ("zotero", "both"):
-        if cfg.zotero_library_id and cfg.zotero_api_key:
-            from science_ai.services.zotero_client import ZoteroClient
-            zotero_client = ZoteroClient(
-                library_id=cfg.zotero_library_id,
-                api_key=cfg.zotero_api_key,
-                library_type=cfg.zotero_library_type,
-            )
-
-    orchestrator = ResearchOrchestrator(
-        cost_tracker=tracker,
-        graph_store=graph_store,
-        zotero_client=zotero_client,
-        monitor=_monitor,
-    )
-
     try:
-        if phase >= 3:
-            result = await orchestrator.run_phase3(
-                question=question,
-                session_id=session_id,
-                max_papers_to_read=max_papers,
-                user_background=user_background,
-                source=source,
-            )
-        elif phase >= 2:
-            result = await orchestrator.run_phase2(
-                question=question,
-                session_id=session_id,
-                max_papers_to_read=max_papers,
-                source=source,
-            )
+        runner = await _get_graph_runner()
+        tracker = runner.cost_tracker
+        graph_store, zotero_client, vector_store, embedding_fn = (
+            await _build_session_resources(phase, source, cfg)
+        )
+        hitl_gates = _sessions.get(session_id, {}).get("hitl_gates", [])
+
+        result = await runner.run(
+            question=question,
+            session_id=session_id,
+            phase=phase,
+            max_papers=max_papers,
+            user_background=user_background,
+            source=source,
+            cost_tracker=tracker,
+            graph_store=graph_store,
+            vector_store=vector_store,
+            embedding_fn=embedding_fn,
+            zotero_client=zotero_client,
+            hitl_gates=hitl_gates,
+        )
+
+        # If a HITL gate paused the run, surface it for /resume.
+        pending = await runner.get_pending_interrupt(session_id)
+        session = _sessions.setdefault(session_id, {})
+        if pending is not None:
+            session["status"] = "awaiting_input"
+            session["interrupt"] = pending
+            await _persist_status(session_id, "awaiting_input")
         else:
-            result = await orchestrator.run_phase1(
-                question=question,
-                session_id=session_id,
-                max_papers_to_read=max_papers,
-                source=source,
-            )
-        await _persist_result(session_id, result, tracker)
+            session["result"] = result
+            session["status"] = "completed"
+            await _persist_result(session_id, result, tracker)
     except Exception:
-        logger.exception("Pipeline failed for session %s", session_id)
+        logger.exception("Graph pipeline failed for session %s", session_id)
+        session = _sessions.setdefault(session_id, {})
+        session["status"] = "failed"
+        session["result"] = {"status": "failed"}
         await _persist_status(session_id, "failed")

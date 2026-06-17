@@ -71,6 +71,31 @@ class BaseAgent(ABC):
     def build_user_message(self, content: str) -> dict[str, str]:
         return {"role": "user", "content": content}
 
+    @staticmethod
+    def extract_list(parsed: Any, *keys: str) -> list[dict[str, Any]]:
+        """Pull a list out of an LLM JSON response regardless of envelope shape.
+
+        Models — especially the CLI tools — don't reliably wrap arrays in the
+        requested key. This accepts any of:
+          - ``{"ideas": [...]}``           (the requested key)
+          - ``{"results": [...]}``         (CLI client wraps a bare array here)
+          - ``[...]``                      (a bare top-level array)
+        Returns ``[]`` only when no list can be found, so a stray response shape
+        never silently drops a whole stage's output.
+        """
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            for key in (*keys, "results"):
+                value = parsed.get(key)
+                if isinstance(value, list):
+                    return value
+            # Last resort: if exactly one value is a list, use it.
+            list_values = [v for v in parsed.values() if isinstance(v, list)]
+            if len(list_values) == 1:
+                return list_values[0]
+        return []
+
     @abstractmethod
     async def run(self, **kwargs: Any) -> dict[str, Any]:
         """Execute the agent's main task. Subclasses must implement."""

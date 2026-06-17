@@ -144,22 +144,25 @@ export interface ZoteroCollection {
   num_items: number;
 }
 
-export interface StepProgress {
-  step_number: number;
-  step_name: string;
-  status: "running" | "done" | "skipped" | "failed";
-  started_at: number;
-  finished_at: number | null;
-  duration_seconds: number;
-  error: string | null;
+export interface NodeMetric {
+  node: string;
+  duration_s: number;
+  status?: string | null;
 }
 
-export interface PipelineProgress {
+export interface NodeAggregate {
+  node: string;
+  calls: number;
+  total_s: number;
+}
+
+export interface TraceResponse {
   session_id: string;
-  current_step: string | null;
-  current_step_number: number | null;
-  elapsed_seconds: number | null;
-  steps: StepProgress[];
+  status: string;
+  node_count: number;
+  total_duration_s: number;
+  by_node: NodeAggregate[];
+  trace: NodeMetric[];
 }
 
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
@@ -207,8 +210,9 @@ export const api = {
   // Sessions
   listSessions: () => fetchJSON<SessionListItem[]>("/sessions"),
 
-  getProgress: (sessionId: string) =>
-    fetchJSON<PipelineProgress>(`/research/${sessionId}/progress`),
+  // Per-node execution trace (timing) from the graph's observability layer.
+  getTrace: (sessionId: string) =>
+    fetchJSON<TraceResponse>(`/research/${sessionId}/trace`),
 
   // Zotero
   listZoteroCollections: () =>

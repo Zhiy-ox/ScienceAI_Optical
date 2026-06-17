@@ -49,7 +49,9 @@ export function StatusBadge({ status }: { status: string }) {
         ? "badge-completed"
         : status === "failed"
           ? "badge-failed"
-          : "badge-started";
+          : status === "awaiting_input"
+            ? "badge-awaiting"
+            : "badge-started";
 
-  return <span className={`glass-badge ${cls}`}>{status}</span>;
+  return <span className={`glass-badge ${cls}`}>{status.replace(/_/g, " ")}</span>;
 }

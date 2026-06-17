@@ -47,3 +47,4 @@ class ResearchState(TypedDict, total=False):
     status: str
     papers_found: int
     cost_summary: dict[str, Any]
+    node_metrics: Annotated[list[dict], operator.add]  # per-node timing trace

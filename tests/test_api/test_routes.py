@@ -192,8 +192,6 @@ def test_cost_404_when_no_tracker_and_no_stored_records():
     session = _make_session(status="completed", cost_records=None)
     repo = _mock_repo(get_session_return=session)
     with patch.object(routes_module, "_session_repo", repo):
-        # Ensure in-memory tracker is absent
-        routes_module._cost_trackers.pop(session.session_id, None)
         client = TestClient(app)
         resp = client.get(f"/api/v1/research/{session.session_id}/cost")
     assert resp.status_code == 404

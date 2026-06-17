@@ -3,7 +3,16 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import GlassCard, { StatCard, StatusBadge } from "@/components/GlassCard";
+import { PIPELINE_STAGES } from "@/components/PipelineProgress";
 import { api, type HealthResponse, type SessionListItem } from "@/lib/api";
+
+// Color accents cycled across the pipeline rail, grouped by phase.
+const STAGE_COLORS = [
+  "var(--accent-blue)", "var(--accent-blue)", "var(--accent-purple)",
+  "var(--accent-purple)", "var(--accent-purple)", "var(--accent-teal)",
+  "var(--accent-rose)", "var(--accent-rose)", "var(--accent-teal)",
+  "var(--accent-teal)", "var(--accent-amber)", "var(--accent-amber)",
+];
 
 export default function DashboardPage() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -101,11 +110,41 @@ export default function DashboardPage() {
         </div>
 
         {sessions.length === 0 ? (
-          <div className="text-center py-12">
-            <p className="text-white/40 text-sm">No sessions yet — start your first research.</p>
-            <Link href="/new" className="text-[var(--accent-blue)] text-sm mt-2 inline-block hover:text-[var(--accent-teal)]">
-              Start Research →
-            </Link>
+          <div className="py-8">
+            {!connected ? (
+              <div className="text-center py-6">
+                <p className="text-white/50 text-sm">The API isn&apos;t reachable.</p>
+                <p className="text-white/30 text-xs mt-2 font-mono">
+                  ./start.sh &nbsp;·&nbsp; or: uvicorn science_ai.main:app --port 8000
+                </p>
+              </div>
+            ) : (
+              <div className="max-w-md mx-auto space-y-4">
+                <p className="text-white/50 text-sm text-center mb-6">
+                  No sessions yet — three steps to your first literature review:
+                </p>
+                {[
+                  { n: 1, title: "Configure a provider", desc: "Add an API key (or switch to free CLI mode) in Settings.", href: "/settings", cta: "Open Settings" },
+                  { n: 2, title: "Ask a research question", desc: "Pick the pipeline depth — from quick triage to full ideation.", href: "/new", cta: "New Research" },
+                  { n: 3, title: "Watch it run", desc: "Live stage progress, paper triage, gaps, ideas, and a final report.", href: null, cta: null },
+                ].map((step) => (
+                  <div key={step.n} className="flex items-start gap-4 glass-subtle p-4">
+                    <span className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0 bg-[var(--accent-blue)]/15 text-[var(--accent-blue)] border border-[var(--accent-blue)]/30">
+                      {step.n}
+                    </span>
+                    <div className="flex-1">
+                      <p className="text-sm font-medium text-white/75">{step.title}</p>
+                      <p className="text-xs text-white/40 mt-0.5">{step.desc}</p>
+                    </div>
+                    {step.href && (
+                      <Link href={step.href} className="text-xs text-[var(--accent-blue)] hover:text-[var(--accent-teal)] shrink-0 mt-1">
+                        {step.cta} →
+                      </Link>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -161,37 +200,29 @@ export default function DashboardPage() {
         )}
       </GlassCard>
 
-      {/* Pipeline visualization */}
+      {/* Pipeline visualization — the same stage list the live progress rail uses */}
       <GlassCard hover={false}>
         <h3 className="text-lg font-semibold text-white/80 mb-6">Pipeline Stages</h3>
         <div className="flex items-center gap-3 overflow-x-auto pb-2">
-          {[
-            { name: "Plan", color: "var(--accent-blue)" },
-            { name: "Search", color: "var(--accent-blue)" },
-            { name: "Triage", color: "var(--accent-purple)" },
-            { name: "Deep Read", color: "var(--accent-purple)" },
-            { name: "Critique", color: "var(--accent-rose)" },
-            { name: "Gap Detect", color: "var(--accent-rose)" },
-            { name: "Verify", color: "var(--accent-teal)" },
-            { name: "Ideate", color: "var(--accent-teal)" },
-            { name: "Experiment", color: "var(--accent-amber)" },
-            { name: "Report", color: "var(--accent-amber)" },
-          ].map((stage, i) => (
-            <div key={stage.name} className="flex items-center gap-3 shrink-0">
-              <div
-                className="glass-subtle px-4 py-2 text-xs font-medium whitespace-nowrap"
-                style={{ borderColor: stage.color, borderWidth: 1 }}
-              >
-                <span style={{ color: stage.color }}>{i + 1}.</span>{" "}
-                <span className="text-white/70">{stage.name}</span>
+          {PIPELINE_STAGES.map((stage, i) => {
+            const color = STAGE_COLORS[i % STAGE_COLORS.length];
+            return (
+              <div key={stage.key} className="flex items-center gap-3 shrink-0">
+                <div
+                  className="glass-subtle px-4 py-2 text-xs font-medium whitespace-nowrap"
+                  style={{ borderColor: color, borderWidth: 1 }}
+                >
+                  <span style={{ color }}>{i + 1}.</span>{" "}
+                  <span className="text-white/70">{stage.label}</span>
+                </div>
+                {i < PIPELINE_STAGES.length - 1 && (
+                  <svg className="w-4 h-4 text-white/15 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                )}
               </div>
-              {i < 9 && (
-                <svg className="w-4 h-4 text-white/15 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                </svg>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       </GlassCard>
     </div>

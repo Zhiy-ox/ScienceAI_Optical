@@ -1,74 +1,17 @@
-"""End-to-end graph execution with faked agents.
+"""End-to-end Phase 1 graph execution with faked agents.
 
-Validates that the compiled graph runs through ``ainvoke`` and that Feedback
-Loop 1 (search refinement) actually cycles and terminates at the max-iteration
-bound.
-
-The agent submodules are injected into ``sys.modules`` so the nodes' lazy
-imports resolve to in-test fakes — the real agents (and their heavy
-litellm/cryptography import chain) are never loaded.
+Validates that the compiled graph runs through ``ainvoke``/``astream`` and that
+Feedback Loop 1 (search refinement) actually cycles and terminates at the
+max-iteration bound. Fakes and fixtures live in ``conftest.py``.
 """
-
-import itertools
-import sys
-import types
 
 import pytest
 
 from science_ai.orchestrator.feedback import MAX_LOOP_ITERATIONS
 
 
-class FakePaper:
-    def __init__(self, pid: str):
-        self.paper_id = pid
-        self.title = f"Title {pid}"
-        self.abstract = f"Abstract for {pid}"
-
-
-class FakeSearch:
-    """Returns two unique, never-before-seen papers on every call."""
-
-    def __init__(self):
-        self._counter = itertools.count()
-
-    async def search(self, query, **kwargs):
-        return [FakePaper(f"p{next(self._counter)}") for _ in range(2)]
-
-
-class FakePlanner:
-    def __init__(self, llm, session_id=""):
-        pass
-
-    async def run(self, *, question, **kwargs):
-        return {
-            "search_queries": [{"keywords": ["base"], "source": "semantic_scholar"}],
-            "scope": {},
-        }
-
-
-class FakeTriage:
-    def __init__(self, llm, session_id=""):
-        pass
-
-    async def run(self, *, question, papers, **kwargs):
-        return [{"paper_id": p["paper_id"], "priority": "must_read"} for p in papers]
-
-
-def _install_fake_agents(monkeypatch, deep_reader_cls):
-    """Register fake agent submodules so node-level lazy imports resolve to fakes."""
-    def _mod(name, **attrs):
-        m = types.ModuleType(name)
-        for k, v in attrs.items():
-            setattr(m, k, v)
-        monkeypatch.setitem(sys.modules, name, m)
-
-    _mod("science_ai.agents.query_planner", QueryPlanner=FakePlanner)
-    _mod("science_ai.agents.paper_triage", PaperTriage=FakeTriage)
-    _mod("science_ai.agents.deep_reader", DeepReader=deep_reader_cls)
-
-
 @pytest.mark.asyncio
-async def test_phase1_refinement_loop_bounded(monkeypatch):
+async def test_phase1_refinement_loop_bounded(install_agents, graph_runner):
     class NovelReader:
         """Every paper yields a brand-new keyword, so refinement keeps firing."""
 
@@ -82,12 +25,9 @@ async def test_phase1_refinement_loop_bounded(monkeypatch):
                 "research_problem": {},
             }
 
-    _install_fake_agents(monkeypatch, NovelReader)
+    install_agents(DeepReader=NovelReader)
 
-    from science_ai.orchestrator.graph.runner import GraphRunner
-
-    runner = GraphRunner(search_service=FakeSearch(), llm_backend="cli")
-    result = await runner.run(
+    result = await graph_runner.run(
         "What are advances in optical phased arrays?",
         session_id="e2e-phase1",
         phase=1,
@@ -103,25 +43,11 @@ async def test_phase1_refinement_loop_bounded(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_phase1_no_refinement_when_no_new_keywords(monkeypatch):
-    class StaticReader:
-        def __init__(self, llm, session_id=""):
-            pass
+async def test_phase1_no_refinement_when_no_new_keywords(install_agents, graph_runner):
+    # Default DeepReader (StaticReader) emits the plan keyword → 0% novelty.
+    install_agents()
 
-        async def run(self, *, paper_text, paper_id="", title="", priority="high", **kwargs):
-            # key_component equals the plan keyword → 0% novelty → no refinement
-            return {
-                "paper_id": paper_id,
-                "method": {"key_components": ["base"]},
-                "research_problem": {},
-            }
-
-    _install_fake_agents(monkeypatch, StaticReader)
-
-    from science_ai.orchestrator.graph.runner import GraphRunner
-
-    runner = GraphRunner(search_service=FakeSearch(), llm_backend="cli")
-    result = await runner.run(
+    result = await graph_runner.run(
         "test", session_id="e2e-norefine", phase=1, max_papers=10,
     )
 
@@ -130,29 +56,14 @@ async def test_phase1_no_refinement_when_no_new_keywords(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_state_returns_completed_run(monkeypatch):
+async def test_get_state_returns_completed_run(install_agents, graph_runner):
     """After a run, get_state returns the checkpointed final state."""
+    install_agents()
 
-    class SimpleReader:
-        def __init__(self, llm, session_id=""):
-            pass
-
-        async def run(self, *, paper_text, paper_id="", title="", priority="high", **kwargs):
-            return {
-                "paper_id": paper_id,
-                "method": {"key_components": ["base"]},
-                "research_problem": {},
-            }
-
-    _install_fake_agents(monkeypatch, SimpleReader)
-
-    from science_ai.orchestrator.graph.runner import GraphRunner
-
-    runner = GraphRunner(search_service=FakeSearch(), llm_backend="cli")
     sid = "e2e-getstate"
-    await runner.run("test question", session_id=sid, phase=1, max_papers=10)
+    await graph_runner.run("test question", session_id=sid, phase=1, max_papers=10)
 
-    state = await runner.get_state(sid)
+    state = await graph_runner.get_state(sid)
     assert state is not None
     assert state["session_id"] == sid
     assert state["question"] == "test question"
@@ -160,31 +71,15 @@ async def test_get_state_returns_completed_run(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stream_yields_progress_and_updates(monkeypatch):
+async def test_stream_yields_progress_and_updates(install_agents, graph_runner):
     """stream() yields both custom progress events and node updates."""
-
-    class SimpleReader:
-        def __init__(self, llm, session_id=""):
-            pass
-
-        async def run(self, *, paper_text, paper_id="", title="", priority="high", **kwargs):
-            return {
-                "paper_id": paper_id,
-                "method": {"key_components": ["base"]},
-                "research_problem": {},
-            }
-
-    _install_fake_agents(monkeypatch, SimpleReader)
-
-    from science_ai.orchestrator.graph.runner import GraphRunner
-
-    runner = GraphRunner(search_service=FakeSearch(), llm_backend="cli")
+    install_agents()
 
     modes_seen = set()
     progress_stages = []
     node_names = []
 
-    async for mode, chunk in runner.stream(
+    async for mode, chunk in graph_runner.stream(
         "stream test", session_id="e2e-stream", phase=1, max_papers=10,
     ):
         modes_seen.add(mode)

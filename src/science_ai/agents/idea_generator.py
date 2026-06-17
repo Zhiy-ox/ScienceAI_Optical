@@ -82,6 +82,6 @@ class IdeaGenerator(BaseAgent):
         ]
 
         result = await self.call_llm_json(messages=messages, max_tokens=8192)
-        ideas = result["parsed"].get("ideas", [])
+        ideas = self.extract_list(result["parsed"], "ideas")
         logger.info("IdeaGenerator: generated %d ideas", len(ideas))
         return ideas

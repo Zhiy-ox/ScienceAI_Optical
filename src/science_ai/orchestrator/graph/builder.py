@@ -33,6 +33,7 @@ from science_ai.orchestrator.graph.nodes import (
     verify_node,
     zotero_export_node,
 )
+from science_ai.orchestrator.graph.observability import timed_node
 from science_ai.orchestrator.graph.state import ResearchState
 
 
@@ -45,27 +46,32 @@ def build_graph(*, checkpointer=None):
     """
     g = StateGraph(ResearchState)
 
+    # Register every node wrapped in the timing decorator so each execution
+    # contributes a record to the checkpointed node_metrics trace.
+    def _node(name, fn):
+        g.add_node(name, timed_node(name, fn))
+
     # --- Nodes ---
-    g.add_node("plan", plan_node)
-    g.add_node("plan_gate", plan_gate_node)
-    g.add_node("gaps_gate", gaps_gate_node)
-    g.add_node("search", search_node)
-    g.add_node("triage", triage_node)
-    g.add_node("select_papers", select_papers_node)
+    _node("plan", plan_node)
+    _node("plan_gate", plan_gate_node)
+    _node("gaps_gate", gaps_gate_node)
+    _node("search", search_node)
+    _node("triage", triage_node)
+    _node("select_papers", select_papers_node)
     # Fan-out nodes for deep read
-    g.add_node("deep_read_one", deep_read_one)
+    _node("deep_read_one", deep_read_one)
     # Feedback decision + fan-out for critique
-    g.add_node("refine_decision", refine_decision_node)
-    g.add_node("critique_one", critique_one)
-    g.add_node("index", index_node)
-    g.add_node("gap_detect", gap_detect_node)
-    g.add_node("verify", verify_node)
-    g.add_node("gap_retry_decision", gap_retry_decision_node)
-    g.add_node("idea", idea_node)
-    g.add_node("experiment", experiment_node)
-    g.add_node("idea_regen_decision", idea_regen_decision_node)
-    g.add_node("report", report_node)
-    g.add_node("zotero_export", zotero_export_node)
+    _node("refine_decision", refine_decision_node)
+    _node("critique_one", critique_one)
+    _node("index", index_node)
+    _node("gap_detect", gap_detect_node)
+    _node("verify", verify_node)
+    _node("gap_retry_decision", gap_retry_decision_node)
+    _node("idea", idea_node)
+    _node("experiment", experiment_node)
+    _node("idea_regen_decision", idea_regen_decision_node)
+    _node("report", report_node)
+    _node("zotero_export", zotero_export_node)
 
     # --- Edges ---
     g.set_entry_point("plan")

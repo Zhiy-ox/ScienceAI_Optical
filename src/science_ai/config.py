@@ -19,9 +19,6 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://scienceai:scienceai@localhost:5432/scienceai"
 
-    # Redis
-    redis_url: str = "redis://localhost:6379/0"
-
     # Qdrant
     qdrant_url: str = "http://localhost:6333"
 
@@ -41,18 +38,28 @@ class Settings(BaseSettings):
     cli_claude_command: str = "claude"
     cli_timeout_seconds: int = 240
 
-    # Orchestrator mode: "graph" (LangGraph, default) or "legacy" (deprecated
-    # sequential orchestrator, kept as a fallback during the cutover soak period)
-    orchestrator_mode: str = "graph"
-
     # Graph checkpointer DSN (psycopg v3 format).
     # Empty string = use in-memory MemorySaver (no durability).
     # Set to e.g. "postgresql://scienceai:scienceai@localhost:5432/scienceai"
     # to enable durable resume across server restarts.
     checkpointer_dsn: str = ""
 
+    # Max concurrent agent calls within a parallel fan-out stage (deep read,
+    # critique). Caps load on the LLM backend; tune per deployment.
+    fanout_concurrency: int = 5
+
     # Cost budget (USD) — pipeline stops if exceeded
     cost_budget_usd: float = Field(default=10.0)
+
+    # Comma-separated list of allowed CORS origins for the dashboard. Override in
+    # production with the deployed dashboard URL(s), e.g.
+    # "https://app.example.com,https://www.example.com".
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """The configured CORS origins as a clean list."""
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 # ---------------------------------------------------------------------------

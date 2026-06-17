@@ -6,6 +6,7 @@ LangGraph merges back into ResearchState via its reducers.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -20,6 +21,7 @@ from science_ai.orchestrator.feedback import (
     verification_pass_ratio,
 )
 from science_ai.orchestrator.graph.deps import get_deps
+from science_ai.orchestrator.graph.ids import assign_sequential_ids, stamp_linked_id
 from science_ai.orchestrator.graph.state import ResearchState
 
 logger = logging.getLogger(__name__)
@@ -414,11 +416,19 @@ async def index_node(state: ResearchState, config: RunnableConfig) -> dict[str, 
     knowledge_objects = state.get("knowledge_objects", [])
 
     if deps.vector_store and deps.embedding_fn:
-        for ko in knowledge_objects:
-            try:
-                await deps.vector_store.index_knowledge_object(ko, deps.embedding_fn)
-            except Exception:
-                logger.exception("Failed to index paper %s", ko.get("paper_id"))
+        # Embedding + upsert per object is independent I/O — run concurrently.
+        results = await asyncio.gather(
+            *(
+                deps.vector_store.index_knowledge_object(ko, deps.embedding_fn)
+                for ko in knowledge_objects
+            ),
+            return_exceptions=True,
+        )
+        for ko, res in zip(knowledge_objects, results):
+            if isinstance(res, BaseException):
+                logger.error(
+                    "Failed to index paper %s", ko.get("paper_id"), exc_info=res,
+                )
 
     if deps.graph_store:
         for ko in knowledge_objects:
@@ -462,6 +472,10 @@ async def gap_detect_node(state: ResearchState, config: RunnableConfig) -> dict[
 
     gaps = await gap_detector.run(**run_kwargs)
 
+    # Stamp canonical IDs so verification / ideation can reference gaps reliably,
+    # regardless of the placeholder IDs the LLM emits.
+    gaps = assign_sequential_ids(gaps, "GAP")
+
     emit_progress("gap_detect", f"Found {len(gaps)} candidate gaps", count=len(gaps))
     logger.info("[graph] gap_detect_node: %d gaps", len(gaps))
     return {"gaps": gaps, "status": "gaps_detected"}
@@ -484,6 +498,29 @@ async def verify_node(state: ResearchState, config: RunnableConfig) -> dict[str,
         deps.llm, session_id=sid, search_service=deps.search,
     )
     verification_results = await verifier.run(gaps=gaps)
+
+    # The verifier returns one result per gap in order; re-stamp the canonical
+    # gap_id and carry the gap's description so verified_gaps stay linkable to
+    # their source gap during ideation (the LLM's own gap_id is unreliable).
+    # Positional stamping is only safe when the counts line up — if the agent
+    # dropped or added results, re-stamping would mislink every result after
+    # the mismatch, so fall back to matching on the agent-provided gap_id.
+    if len(verification_results) == len(gaps):
+        for gap, result in zip(gaps, verification_results):
+            if isinstance(result, dict):
+                stamp_linked_id(result, gap, "gap_id")
+                result.setdefault("description", gap.get("description", ""))
+    else:
+        logger.warning(
+            "verify_node: %d results for %d gaps — keeping agent-provided gap_ids",
+            len(verification_results), len(gaps),
+        )
+        gaps_by_id = {g.get("gap_id"): g for g in gaps if isinstance(g, dict)}
+        for result in verification_results:
+            if isinstance(result, dict):
+                gap = gaps_by_id.get(result.get("gap_id"))
+                if gap:
+                    result.setdefault("description", gap.get("description", ""))
 
     verified_gaps = [
         v for v in verification_results if v.get("status") == "verified_gap"
@@ -508,16 +545,50 @@ async def verify_node(state: ResearchState, config: RunnableConfig) -> dict[str,
 # Stage 10: Idea Generation
 # ------------------------------------------------------------------
 
+def _top_candidate_gaps(gaps: list[dict], limit: int = 5) -> list[dict]:
+    """Rank candidate gaps for fallback ideation (highest confidence first)."""
+    impact_rank = {"high": 3, "medium": 2, "low": 1}
+
+    def score(gap: dict) -> float:
+        conf = gap.get("confidence", 0.5)
+        try:
+            conf = float(conf)
+        except (TypeError, ValueError):
+            conf = 0.5
+        impact = impact_rank.get(str(gap.get("potential_impact", "medium")).lower(), 2)
+        return conf * impact
+
+    return sorted(gaps, key=score, reverse=True)[:limit]
+
+
 async def idea_node(state: ResearchState, config: RunnableConfig) -> dict[str, Any]:
     deps = get_deps(config)
     sid = state["session_id"]
     verified_gaps = state.get("verified_gaps", [])
     knowledge_objects = state.get("knowledge_objects", [])
 
-    if not verified_gaps:
-        return {"ideas": [], "status": "no_gaps"}
-
-    emit_progress("idea", f"Generating ideas from {len(verified_gaps)} gaps…")
+    gaps_for_ideation = verified_gaps
+    if not gaps_for_ideation:
+        # The verifier marked nothing as strictly novel — common when related
+        # work already exists (gaps come back "active_area"/"emerging"). Rather
+        # than abandoning Phase 3, ideate on the strongest *candidate* gaps so
+        # the run still yields ideas, experiments, and a report.
+        candidate_gaps = state.get("gaps", [])
+        if not candidate_gaps:
+            logger.info("[graph] idea_node: no gaps at all, skipping ideation")
+            return {"ideas": [], "status": "no_gaps"}
+        gaps_for_ideation = _top_candidate_gaps(candidate_gaps)
+        emit_progress(
+            "idea",
+            f"No strictly-novel gaps; ideating on {len(gaps_for_ideation)} "
+            "top candidates…",
+        )
+        logger.info(
+            "[graph] idea_node: 0 verified gaps → falling back to %d candidates",
+            len(gaps_for_ideation),
+        )
+    else:
+        emit_progress("idea", f"Generating ideas from {len(verified_gaps)} gaps…")
 
     from science_ai.agents.idea_generator import IdeaGenerator
 
@@ -529,10 +600,13 @@ async def idea_node(state: ResearchState, config: RunnableConfig) -> dict[str, A
 
     idea_gen = IdeaGenerator(deps.llm, session_id=sid)
     ideas = await idea_gen.run(
-        verified_gaps=verified_gaps,
+        verified_gaps=gaps_for_ideation,
         knowledge_objects=knowledge_objects,
         user_background=user_background,
     )
+
+    # Stamp canonical idea IDs so experiment plans can reference them reliably.
+    ideas = assign_sequential_ids(ideas, "IDEA")
 
     emit_progress("idea", f"Generated {len(ideas)} research ideas", count=len(ideas))
     logger.info("[graph] idea_node: %d ideas", len(ideas))
@@ -554,16 +628,27 @@ async def experiment_node(state: ResearchState, config: RunnableConfig) -> dict[
     from science_ai.agents.experiment_planner import ExperimentPlanner
 
     exp_planner = ExperimentPlanner(deps.llm, session_id=sid)
-    experiment_plans: list[dict] = []
 
-    for idea in ideas:
-        try:
-            plan = await exp_planner.run(
-                idea=idea, knowledge_objects=knowledge_objects,
-            )
-            experiment_plans.append(plan)
-        except Exception:
-            logger.exception("Failed to plan experiment for idea '%s'", idea.get("title", ""))
+    # Plans are independent per idea — run them concurrently, bounded by the
+    # same semaphore that limits the deep-read/critique fan-out.
+    async def plan_one(idea: dict) -> dict | None:
+        async with deps.fanout_semaphore:
+            try:
+                plan = await exp_planner.run(
+                    idea=idea, knowledge_objects=knowledge_objects,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to plan experiment for idea '%s'", idea.get("title", ""),
+                )
+                return None
+        # Link the plan back to its source idea's canonical ID.
+        if isinstance(plan, dict):
+            stamp_linked_id(plan, idea, "idea_id")
+        return plan
+
+    results = await asyncio.gather(*(plan_one(idea) for idea in ideas))
+    experiment_plans: list[dict] = [p for p in results if p is not None]
 
     emit_progress("experiment", f"Planned {len(experiment_plans)} experiments")
     logger.info("[graph] experiment_node: %d plans", len(experiment_plans))
@@ -585,6 +670,7 @@ async def report_node(state: ResearchState, config: RunnableConfig) -> dict[str,
     report_writer = ReportWriter(deps.llm, session_id=sid)
     cost_summary = deps.cost_tracker.session_summary(sid)
 
+    report: dict[str, Any] | None = None
     try:
         report = await report_writer.run(
             question=state["question"],
@@ -600,9 +686,73 @@ async def report_node(state: ResearchState, config: RunnableConfig) -> dict[str,
         logger.exception("Failed to generate report")
         report = None
 
+    # Never leave the user empty-handed: if the writer failed or returned an
+    # unusable shape, synthesize a structured report from what the pipeline
+    # already produced.
+    if not isinstance(report, dict) or not report.get("sections"):
+        report = _fallback_report(state, cost_summary)
+        logger.info("[graph] report_node: used fallback report synthesis")
+
     emit_progress("report", "Report complete")
     logger.info("[graph] report_node complete")
     return {"report": report, "status": "report_written"}
+
+
+def _fallback_report(state: ResearchState, cost_summary: dict) -> dict[str, Any]:
+    """Build a minimal, honest report from pipeline state.
+
+    Used when the LLM report writer fails (timeout, malformed JSON) or returns
+    an empty report — so Phase 3 always ends with something readable.
+    """
+    question = state.get("question", "")
+    kos = state.get("knowledge_objects", [])
+    verified_gaps = state.get("verified_gaps", [])
+    gaps = verified_gaps or state.get("gaps", [])
+    ideas = state.get("ideas", [])
+    plans = state.get("experiment_plans", [])
+
+    def _bullets(items: list[dict], *fields: str) -> str:
+        lines = []
+        for it in items:
+            text = next((str(it[f]) for f in fields if it.get(f)), None)
+            if text:
+                lines.append(f"- {text}")
+        return "\n".join(lines) or "_None recorded._"
+
+    sections = [
+        {
+            "heading": "Executive Summary",
+            "content": (
+                f"Analysis of {len(kos)} papers for the question "
+                f"“{question}” produced {len(gaps)} research gap(s), "
+                f"{len(ideas)} idea(s), and {len(plans)} experiment plan(s). "
+                "This summary was assembled directly from pipeline outputs "
+                "because the report writer did not return a full draft."
+            ),
+        },
+        {
+            "heading": "Papers Analyzed",
+            "content": _bullets(kos, "title", "paper_id"),
+        },
+        {
+            "heading": "Research Gaps",
+            "content": _bullets(gaps, "description", "gap_id"),
+        },
+        {
+            "heading": "Research Ideas",
+            "content": _bullets(ideas, "title", "description", "idea_id"),
+        },
+    ]
+    return {
+        "title": f"Research Report: {question}" if question else "Research Report",
+        "sections": sections,
+        "citations": [
+            {"paper_id": ko.get("paper_id"), "title": ko.get("title")}
+            for ko in kos if ko.get("paper_id")
+        ],
+        "cost_summary": cost_summary,
+        "fallback": True,
+    }
 
 
 # ------------------------------------------------------------------
